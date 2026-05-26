@@ -1,0 +1,294 @@
+import 'dart:io';
+import 'dart:convert';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import '../utils/constants.dart';
+
+/// 单个模型配置
+class ModelConfig {
+  String modelName;
+  String apiBaseUrl;
+  String apiKey;
+
+  ModelConfig({
+    this.modelName = '',
+    this.apiBaseUrl = '',
+    this.apiKey = '',
+  });
+
+  bool get isEnabled => apiKey.isNotEmpty && apiBaseUrl.isNotEmpty && modelName.isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'model': modelName,
+        'baseUrl': apiBaseUrl,
+        'apiKey': apiKey,
+      };
+
+  factory ModelConfig.fromJson(Map<String, dynamic> json) => ModelConfig(
+        modelName: json['model'] as String? ?? '',
+        apiBaseUrl: json['baseUrl'] as String? ?? '',
+        apiKey: json['apiKey'] as String? ?? '',
+      );
+}
+
+/// 云端增强服务（可选）
+/// 支持配置最多5个模型，批量解析时自动分配到各模型并行处理
+class CloudEnhanceService {
+  static const _keyModels = 'cloud_models';
+  static const _keyExcludedFolders = 'excluded_folders';
+  static const _keyModelName = 'cloud_model_name';
+  static const _keyApiBaseUrl = 'cloud_api_base_url';
+  static const _keyApiKey = 'cloud_api_key';
+
+  static const int maxModels = 5;
+
+  List<ModelConfig> models = [];
+  Set<String> excludedFolders = {};
+
+  CloudEnhanceService() {
+    models = [ModelConfig()];
+  }
+
+  bool get isEnabled => models.any((m) => m.isEnabled);
+
+  /// 第一个可用模型的 apiKey（向后兼容）
+  String get apiKey => models.isNotEmpty ? models.first.apiKey : '';
+  String get apiBaseUrl => models.isNotEmpty ? models.first.apiBaseUrl : '';
+  String get modelName => models.isNotEmpty ? models.first.modelName : '';
+
+  List<ModelConfig> get enabledModels =>
+      models.where((m) => m.isEnabled).toList();
+
+  bool isFolderExcluded(String folderPath) => excludedFolders.contains(folderPath);
+
+  Future<void> loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    final modelsJson = prefs.getString(_keyModels);
+    if (modelsJson != null && modelsJson.isNotEmpty) {
+      try {
+        final list = jsonDecode(modelsJson) as List<dynamic>;
+        models = list
+            .map((e) => ModelConfig.fromJson(e as Map<String, dynamic>))
+            .toList();
+        if (models.isEmpty) models = [ModelConfig()];
+      } catch (_) {
+        models = [_migrateLegacy(prefs)];
+      }
+    } else {
+      // 迁移旧版单模型配置
+      models = [_migrateLegacy(prefs)];
+    }
+    final excluded = prefs.getStringList(_keyExcludedFolders) ?? [];
+    excludedFolders = excluded.toSet();
+  }
+
+  ModelConfig _migrateLegacy(SharedPreferences prefs) {
+    final name = prefs.getString(_keyModelName) ?? AppConstants.cloudModel;
+    final url = prefs.getString(_keyApiBaseUrl) ?? AppConstants.cloudApiBaseUrl;
+    final key = prefs.getString(_keyApiKey) ?? AppConstants.cloudApiKey;
+    return ModelConfig(modelName: name, apiBaseUrl: url, apiKey: key);
+  }
+
+  Future<void> _saveModels() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyModels,
+        jsonEncode(models.map((m) => m.toJson()).toList()));
+  }
+
+  Future<void> _saveExcludedFolders() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_keyExcludedFolders, excludedFolders.toList());
+  }
+
+  Future<void> addExcludedFolder(String folderPath) async {
+    excludedFolders.add(folderPath);
+    await _saveExcludedFolders();
+  }
+
+  Future<void> removeExcludedFolder(String folderPath) async {
+    excludedFolders.remove(folderPath);
+    await _saveExcludedFolders();
+  }
+
+  /// 添加一个空模型配置
+  void addModel() {
+    if (models.length >= maxModels) return;
+    models.add(ModelConfig());
+  }
+
+  /// 移除指定索引的模型配置
+  Future<void> removeModel(int index) async {
+    if (models.length <= 1) return;
+    models.removeAt(index);
+    await _saveModels();
+  }
+
+  Future<void> setModelName(int index, String name) async {
+    models[index].modelName = name.trim();
+    await _saveModels();
+  }
+
+  Future<void> setApiBaseUrl(int index, String url) async {
+    models[index].apiBaseUrl = url.trim();
+    await _saveModels();
+  }
+
+  Future<void> setApiKey(int index, String key) async {
+    models[index].apiKey = key.trim();
+    await _saveModels();
+  }
+
+  Future<String?> _imageToBase64Url(String imagePath) async {
+    try {
+      final file = File(imagePath);
+      if (!await file.exists()) return null;
+
+      final compressed = await FlutterImageCompress.compressWithFile(
+        imagePath,
+        minWidth: 1024,
+        minHeight: 1024,
+        quality: 70,
+        format: CompressFormat.jpeg,
+      );
+      final bytes = compressed ?? await file.readAsBytes();
+      final base64 = base64Encode(bytes);
+      return 'data:image/jpeg;base64,$base64';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 发送单张图片到云端分析，返回 {tags}
+  /// [model] 可选，不传则使用第一个可用模型
+  Future<Map<String, String>> analyzeImage(String imagePath,
+      {ModelConfig? model}) async {
+    final cfg = model ??
+        (models.isNotEmpty
+            ? models.first
+            : ModelConfig());
+    if (cfg.apiKey.isEmpty) throw Exception('API Key 未配置，请在设置中填写');
+    if (cfg.apiBaseUrl.isEmpty) throw Exception('API Base URL 未配置，请在设置中填写');
+
+    final imageUrl = await _imageToBase64Url(imagePath);
+    if (imageUrl == null) throw Exception('图片压缩或编码失败');
+
+    final client = http.Client();
+    try {
+      final response = await client.post(
+        Uri.parse(cfg.apiBaseUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${cfg.apiKey}',
+        },
+        body: jsonEncode({
+          'model': cfg.modelName,
+          'messages': [
+            {
+              'role': 'user',
+              'content': [
+                {
+                  'type': 'image_url',
+                  'image_url': {'url': imageUrl},
+                },
+                {
+                  'type': 'text',
+                  'text': '详细分析这张图片，生成搜索关键词标签，逗号分隔。\n'
+                      '\n'
+                      '必须包含以下维度：\n'
+                      '1. 场景/地点/氛围：如 室内, 户外, 海滩, 夜晚, 雨天, 夕阳\n'
+                      '2. 主要物体/元素：如 汽车, 蛋糕, 书本, 手机, 花朵\n'
+                      '3. 人物特征（有人物时必写）：\n'
+                      '   - 性别/年龄：如 少女, 青年男性, 老人, 小孩\n'
+                      '   - 发色/发型：如 金发, 黑长直, 短发, 双马尾, 白发\n'
+                      '   - 瞳色：如 蓝瞳, 红瞳, 绿瞳\n'
+                      '   - 服装：如 校服, 连衣裙, 西装, 和服, 卫衣, 泳装\n'
+                      '   - 配饰：如 眼镜, 耳机, 帽子, 耳环\n'
+                      '   - 姿态/动作：如 微笑, 挥手, 奔跑, 坐姿, 回头\n'
+                      '4. 角色名（确定认识时写）：如 初音未来, 哆啦A梦, 路飞\n'
+                      '5. 图中文字（OCR）：所有出现的文字逐条写出\n'
+                      '6. 主色调：如 蓝色调, 暖色调, 黑白\n'
+                      '\n'
+                      '规则：\n'
+                      '- 只输出标签，逗号分隔，不要序号、解释、换行\n'
+                      '- 每个标签尽量具体，如用"粉色连衣裙"而非"衣服"\n'
+                      '- 不确定的特征不要编造',
+                },
+              ],
+            },
+          ],
+        }),
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final choices = data['choices'] as List?;
+        final content = choices
+            ?.map((c) => c['message']?['content'] as String?)
+            .where((s) => s != null && s.isNotEmpty)
+            .join('\n');
+        if (content != null && content.isNotEmpty) {
+          return _parseResult(content);
+        }
+        throw Exception('API 返回了空内容，可能是模型不支持图片分析');
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        throw Exception(
+            '模型 ${cfg.modelName} API Key 无效或无权访问 (HTTP ${response.statusCode})');
+      } else if (response.statusCode == 404) {
+        throw Exception('模型 ${cfg.modelName} API 地址无效 (HTTP 404)，请检查 Base URL');
+      } else {
+        final body = response.body.length > 200
+            ? '${response.body.substring(0, 200)}...'
+            : response.body;
+        throw Exception(
+            '模型 ${cfg.modelName} 请求失败 (HTTP ${response.statusCode}): $body');
+      }
+    } on Exception {
+      rethrow;
+    } catch (e) {
+      throw Exception('网络请求异常: $e');
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 批量分析图片（多模型并行）
+  Future<Map<String, Map<String, String>>> batchAnalyze(
+      List<String> imagePaths) async {
+    final enabled = enabledModels;
+    if (enabled.isEmpty) throw Exception('至少需要配置一个模型');
+
+    final results = <String, Map<String, String>>{};
+    final modelCount = enabled.length;
+
+    // 轮询分配图片到各模型
+    final queues = List.generate(modelCount, (_) => <String>[]);
+    for (int i = 0; i < imagePaths.length; i++) {
+      queues[i % modelCount].add(imagePaths[i]);
+    }
+
+    await Future.wait(enabled.asMap().entries.map((entry) async {
+      final idx = entry.key;
+      final model = entry.value;
+      for (final path in queues[idx]!) {
+        results[path] = await analyzeImage(path, model: model);
+      }
+    }));
+
+    return results;
+  }
+
+  /// 解析模型回复，提取标签
+  Map<String, String> _parseResult(String raw) {
+    final cleaned = raw
+        .replaceAll(RegExp(r'[\n\r]+'), ' ')
+        .replaceAll('，', ',')
+        .trim();
+    final tags = cleaned
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty && s.length < 30)
+        .join(', ');
+    return {'tags': tags};
+  }
+}
