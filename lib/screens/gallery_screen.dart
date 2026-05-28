@@ -40,6 +40,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
   final List<_TempShareEntry> _tempShareCopied = [];
   Timer? _tempShareTimer;
+  DateTime? _tempShareStartedAt;
 
   // 文件夹多选
   bool _folderSelectMode = false;
@@ -129,11 +130,18 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 只在 App 被销毁时清理，切后台（paused）不清理，否则切到微信发图就没文件了
     if (state == AppLifecycleState.detached) {
       _tempShareTimer?.cancel();
       _tempShareTimer = null;
       _restoreTempSharedFiles();
+    } else if (state == AppLifecycleState.resumed && _tempShareStartedAt != null) {
+      // 从后台回来时检查是否超时
+      final durSec = context.read<CloudEnhanceService>().tempShareDurationSec;
+      if (DateTime.now().difference(_tempShareStartedAt!).inSeconds >= durSec) {
+        _tempShareTimer?.cancel();
+        _tempShareTimer = null;
+        _restoreTempSharedFiles();
+      }
     }
   }
 
@@ -1375,6 +1383,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
       );
     }
     if (copied > 0) {
+      _tempShareStartedAt = DateTime.now();
       _tempShareTimer = Timer(Duration(seconds: durSec), _restoreTempShared);
     }
   }
@@ -1382,6 +1391,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   Future<void> _restoreTempSharedFiles() async {
     if (_tempShareCopied.isEmpty) return;
 
+    _tempShareStartedAt = null;
     final toDelete = List<_TempShareEntry>.from(_tempShareCopied);
     _tempShareCopied.clear();
 

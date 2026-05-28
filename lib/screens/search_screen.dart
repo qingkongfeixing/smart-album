@@ -35,6 +35,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
   static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
   final List<_TempShareEntry> _tempShareCopied = [];
   Timer? _tempShareTimer;
+  DateTime? _tempShareStartedAt;
 
   @override
   void initState() {
@@ -44,11 +45,17 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 只在 App 被销毁时清理，切后台（paused）不清理
     if (state == AppLifecycleState.detached) {
       _tempShareTimer?.cancel();
       _tempShareTimer = null;
       _restoreTempSharedFiles();
+    } else if (state == AppLifecycleState.resumed && _tempShareStartedAt != null) {
+      final durSec = context.read<CloudEnhanceService>().tempShareDurationSec;
+      if (DateTime.now().difference(_tempShareStartedAt!).inSeconds >= durSec) {
+        _tempShareTimer?.cancel();
+        _tempShareTimer = null;
+        _restoreTempSharedFiles();
+      }
     }
   }
 
@@ -189,6 +196,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
       );
     }
     if (copied > 0) {
+      _tempShareStartedAt = DateTime.now();
       _tempShareTimer = Timer(Duration(seconds: durSec), _restoreTempShared);
     }
   }
@@ -196,6 +204,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
   Future<void> _restoreTempSharedFiles() async {
     if (_tempShareCopied.isEmpty) return;
 
+    _tempShareStartedAt = null;
     final toDelete = List<_TempShareEntry>.from(_tempShareCopied);
     _tempShareCopied.clear();
 
