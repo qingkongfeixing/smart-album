@@ -405,4 +405,5 @@ class PhotoScanner {
       debugPrint('[PhotoScanner] removeFromMediaStore error: $e');
     }
   }
+
 }

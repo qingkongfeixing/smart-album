@@ -136,7 +136,6 @@ class MainActivity : FlutterActivity() {
 
                 val obj = JSONObject()
                 val contentUri = ContentUris.withAppendedId(uri, id).toString()
-                // 优先用 DATA 路径，空则用 content URI
                 obj.put("path", path ?: contentUri)
                 obj.put("id", contentUri)
                 obj.put("timestamp", dateMod)
@@ -216,4 +215,5 @@ class MainActivity : FlutterActivity() {
         contentResolver.delete(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI, selection, args)
     }
+
 }
