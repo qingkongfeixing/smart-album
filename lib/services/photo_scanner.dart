@@ -375,12 +375,25 @@ class PhotoScanner {
     }
   }
 
-  /// 将新文件注册到系统 MediaStore，使其在其他 App 中可见
-  Future<void> scanFile(String filePath) async {
+  /// 将新文件注册到系统 MediaStore，返回 content URI
+  Future<String?> scanFile(String filePath) async {
     try {
-      await _channel.invokeMethod('scanFile', {'path': filePath});
+      final uri = await _channel.invokeMethod<String>('scanFile', {'path': filePath});
+      return uri;
     } catch (e) {
       debugPrint('[PhotoScanner] scanFile error: $e');
+      return null;
+    }
+  }
+
+  /// 通过 content URI 删除文件（同时清除 MediaStore 记录 + 物理文件）
+  Future<bool> deleteByUri(String uri) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('deleteByUri', {'uri': uri});
+      return ok ?? false;
+    } catch (e) {
+      debugPrint('[PhotoScanner] deleteByUri error: $e');
+      return false;
     }
   }
 

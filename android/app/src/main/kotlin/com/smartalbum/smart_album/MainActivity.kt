@@ -61,6 +61,15 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                         result.error("REMOVE_ERROR", e.message, null)
                     }
+                } else if (call.method == "deleteByUri") {
+                    try {
+                        val uriStr = call.argument<String>("uri") ?: ""
+                        val deleted = contentResolver.delete(
+                            android.net.Uri.parse(uriStr), null, null)
+                        result.success(deleted > 0)
+                    } catch (e: Exception) {
+                        result.error("DELETE_ERROR", e.message, null)
+                    }
                 } else {
                     result.notImplemented()
                 }

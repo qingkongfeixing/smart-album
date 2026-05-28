@@ -20,7 +20,7 @@ class GalleryScreen extends StatefulWidget {
   State<GalleryScreen> createState() => _GalleryScreenState();
 }
 
-class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProviderStateMixin {
+class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final PhotoScanner _scanner;
   List<Photo> _photos = [];
   bool _loading = true;
@@ -38,7 +38,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 
   // 临时分享
   static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
-  final List<String> _tempShareCopied = []; // 待清理的副本路径
+  final List<_TempShareEntry> _tempShareCopied = [];
   Timer? _tempShareTimer;
 
   // 文件夹多选
@@ -119,11 +119,21 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scanner = context.read<PhotoScanner>();
     _loadPhotos();
     _scanner.state.addListener(_onScanStateChanged);
     _scanner.onProgress.addListener(_silentRefresh);
     _photoGridScrollCtrl.addListener(_onPhotoGridScrolled);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _tempShareTimer?.cancel();
+      _tempShareTimer = null;
+      _restoreTempSharedFiles();
+    }
   }
 
   void _onPhotoGridScrolled() {
@@ -1345,8 +1355,8 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         }
 
         await File(destPath).writeAsBytes(await src.readAsBytes());
-        _tempShareCopied.add(destPath);
-        _scanner.scanFile(destPath); // 注册到系统 MediaStore
+        final uri = await _scanner.scanFile(destPath);
+        _tempShareCopied.add(_TempShareEntry(destPath, uri));
         copied++;
       } catch (e) {
         debugPrint('[Gallery] TempShare error for ${photo.id}: $e');
@@ -1371,18 +1381,24 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   Future<void> _restoreTempSharedFiles() async {
     if (_tempShareCopied.isEmpty) return;
 
-    final toDelete = List<String>.from(_tempShareCopied);
+    final toDelete = List<_TempShareEntry>.from(_tempShareCopied);
     _tempShareCopied.clear();
 
-    for (final path in toDelete) {
+    for (final entry in toDelete) {
       try {
-        final f = File(path);
-        if (await f.exists()) {
-          await f.delete();
-          _scanner.removeFromMediaStore(path); // 从系统媒体库移除
+        // 优先通过 MediaStore URI 删除（同时清除媒体记录 + 文件）
+        if (entry.uri != null) {
+          await _scanner.deleteByUri(entry.uri!);
+        } else {
+          // 降级：直接删文件 + 清除媒体记录
+          final f = File(entry.path);
+          if (await f.exists()) {
+            await f.delete();
+            _scanner.removeFromMediaStore(entry.path);
+          }
         }
       } catch (e) {
-        debugPrint('[Gallery] Cleanup error for $path: $e');
+        debugPrint('[Gallery] Cleanup error for ${entry.path}: $e');
       }
     }
   }
@@ -1450,6 +1466,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _silentRefreshTimer?.cancel();
     _thumbHideTimer?.cancel();
     _tempShareTimer?.cancel();
@@ -1464,6 +1481,12 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 }
 
 /// 文件夹缩略图卡片
+class _TempShareEntry {
+  final String path;
+  final String? uri;
+  _TempShareEntry(this.path, this.uri);
+}
+
 class _FolderTile extends StatelessWidget {
   final String folderPath;
   final int photoCount;

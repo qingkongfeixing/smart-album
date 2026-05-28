@@ -17,7 +17,7 @@ class SearchScreen extends StatefulWidget {
   State<SearchScreen> createState() => _SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> {
+class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   final _db = DatabaseHelper.instance;
@@ -33,11 +33,27 @@ class _SearchScreenState extends State<SearchScreen> {
 
   // 临时分享
   static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
-  final List<String> _tempShareCopied = [];
+  final List<_TempShareEntry> _tempShareCopied = [];
   Timer? _tempShareTimer;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _tempShareTimer?.cancel();
+      _tempShareTimer = null;
+      _restoreTempSharedFiles();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     _focusNode.dispose();
     _tempShareTimer?.cancel();
@@ -153,8 +169,8 @@ class _SearchScreenState extends State<SearchScreen> {
         }
 
         await File(destPath).writeAsBytes(await src.readAsBytes());
-        _tempShareCopied.add(destPath);
-        context.read<PhotoScanner>().scanFile(destPath);
+        final uri = await context.read<PhotoScanner>().scanFile(destPath);
+        _tempShareCopied.add(_TempShareEntry(destPath, uri));
         copied++;
       } catch (e) {
         debugPrint('[Search] TempShare error for ${photo.id}: $e');
@@ -179,18 +195,22 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _restoreTempSharedFiles() async {
     if (_tempShareCopied.isEmpty) return;
 
-    final toDelete = List<String>.from(_tempShareCopied);
+    final toDelete = List<_TempShareEntry>.from(_tempShareCopied);
     _tempShareCopied.clear();
 
-    for (final path in toDelete) {
+    for (final entry in toDelete) {
       try {
-        final f = File(path);
-        if (await f.exists()) {
-          await f.delete();
-          context.read<PhotoScanner>().removeFromMediaStore(path);
+        if (entry.uri != null) {
+          await context.read<PhotoScanner>().deleteByUri(entry.uri!);
+        } else {
+          final f = File(entry.path);
+          if (await f.exists()) {
+            await f.delete();
+            context.read<PhotoScanner>().removeFromMediaStore(entry.path);
+          }
         }
       } catch (e) {
-        debugPrint('[Search] Cleanup error for $path: $e');
+        debugPrint('[Search] Cleanup error for ${entry.path}: $e');
       }
     }
   }
@@ -414,4 +434,10 @@ class _SearchScreenState extends State<SearchScreen> {
       ),
     ).then((_) => _dismissKeyboard());
   }
+}
+
+class _TempShareEntry {
+  final String path;
+  final String? uri;
+  _TempShareEntry(this.path, this.uri);
 }
