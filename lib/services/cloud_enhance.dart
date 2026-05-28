@@ -37,6 +37,7 @@ class ModelConfig {
 class CloudEnhanceService {
   static const _keyModels = 'cloud_models';
   static const _keyExcludedFolders = 'excluded_folders';
+  static const _keyTempShareDuration = 'temp_share_duration';
   static const _keyModelName = 'cloud_model_name';
   static const _keyApiBaseUrl = 'cloud_api_base_url';
   static const _keyApiKey = 'cloud_api_key';
@@ -45,6 +46,7 @@ class CloudEnhanceService {
 
   List<ModelConfig> models = [];
   Set<String> excludedFolders = {};
+  int tempShareDurationSec = 10;
 
   CloudEnhanceService() {
     models = [ModelConfig()];
@@ -79,6 +81,7 @@ class CloudEnhanceService {
       // 迁移旧版单模型配置
       models = [_migrateLegacy(prefs)];
     }
+    tempShareDurationSec = prefs.getInt(_keyTempShareDuration) ?? 10;
     final excluded = prefs.getStringList(_keyExcludedFolders) ?? [];
     excludedFolders = excluded.toSet();
   }
@@ -104,6 +107,12 @@ class CloudEnhanceService {
   Future<void> addExcludedFolder(String folderPath) async {
     excludedFolders.add(folderPath);
     await _saveExcludedFolders();
+  }
+
+  Future<void> setTempShareDuration(int seconds) async {
+    tempShareDurationSec = seconds;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyTempShareDuration, seconds);
   }
 
   Future<void> removeExcludedFolder(String folderPath) async {

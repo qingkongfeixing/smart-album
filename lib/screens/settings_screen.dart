@@ -155,6 +155,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  void _showTempShareDurationDialog(CloudEnhanceService cloud) {
+    final controller = TextEditingController(text: '${cloud.tempShareDurationSec}');
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('临时分享恢复时间'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('图片临时移动到分享文件夹后，多少秒自动恢复到原始位置。'),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '秒数',
+                suffixText: '秒',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              children: [5, 10, 15, 30, 60].map((sec) {
+                return ActionChip(
+                  label: Text('$sec 秒'),
+                  onPressed: () {
+                    controller.text = '$sec';
+                  },
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final v = int.tryParse(controller.text.trim());
+              if (v != null && v > 0 && v <= 300) {
+                cloud.setTempShareDuration(v);
+                setState(() {});
+                Navigator.pop(context);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('请输入 1～300 之间的整数')),
+                );
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     super.dispose();
@@ -190,6 +249,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leading: const Icon(Icons.photo_library),
             title: const Text('已索引图片'),
             trailing: Text('$_photoCount 张'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.schedule_send),
+            title: const Text('临时分享恢复时间'),
+            subtitle: Text('${cloudService.tempShareDurationSec} 秒'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _showTempShareDurationDialog(cloudService),
           ),
           InkWell(
             onTap: () => setState(() => _cloudExpanded = !_cloudExpanded),

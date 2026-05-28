@@ -45,6 +45,22 @@ class MainActivity : FlutterActivity() {
                     } catch (e: Exception) {
                         result.error("OPEN_ERROR", e.message, null)
                     }
+                } else if (call.method == "scanFile") {
+                    try {
+                        val path = call.argument<String>("path") ?: ""
+                        val uri = scanFile(path)
+                        result.success(uri)
+                    } catch (e: Exception) {
+                        result.error("SCAN_ERROR", e.message, null)
+                    }
+                } else if (call.method == "removeFromMediaStore") {
+                    try {
+                        val path = call.argument<String>("path") ?: ""
+                        removeFromMediaStore(path)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("REMOVE_ERROR", e.message, null)
+                    }
                 } else {
                     result.notImplemented()
                 }
@@ -165,5 +181,30 @@ class MainActivity : FlutterActivity() {
             }
         }
         return json.toString()
+    }
+
+    private fun scanFile(filePath: String): String? {
+        val file = File(filePath)
+        if (!file.exists()) return null
+
+        val values = android.content.ContentValues().apply {
+            put(MediaStore.Images.Media.DATA, filePath)
+            put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+            put(MediaStore.Images.Media.DATE_MODIFIED, file.lastModified() / 1000)
+            put(MediaStore.Images.Media.SIZE, file.length())
+        }
+
+        val uri = contentResolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        return uri?.toString()
+    }
+
+    private fun removeFromMediaStore(filePath: String) {
+        val selection = "${MediaStore.Images.Media.DATA} = ?"
+        val args = arrayOf(filePath)
+        contentResolver.delete(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, selection, args)
     }
 }

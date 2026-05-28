@@ -36,6 +36,11 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   List<Photo>? _cbPhotos;   // 剪贴板照片
   bool _cbIsCut = false;    // true=剪切, false=复制
 
+  // 临时分享
+  static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
+  final List<String> _tempShareCopied = []; // 待清理的副本路径
+  Timer? _tempShareTimer;
+
   // 文件夹多选
   bool _folderSelectMode = false;
   final Set<String> _selectedFolders = {};
@@ -837,6 +842,11 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
               onPressed: _cutSelected,
             ),
             IconButton(
+              icon: const Icon(Icons.schedule_send),
+              tooltip: '临时分享',
+              onPressed: _tempShareSelected,
+            ),
+            IconButton(
               icon: const Icon(Icons.cloud_upload),
               tooltip: '解析所选',
               onPressed: _cloudAnalyzeSelected,
@@ -1299,6 +1309,97 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
     }
   }
 
+  Future<void> _tempShareSelected() async {
+    if (_selectedIds.isEmpty) return;
+
+    // 如果已有进行中的临时分享，先清理
+    if (_tempShareTimer != null) {
+      _tempShareTimer!.cancel();
+      _tempShareTimer = null;
+      await _restoreTempSharedFiles();
+    }
+
+    final sel = _photos.where((p) => p.id != null && _selectedIds.contains(p.id)).toList();
+    if (sel.isEmpty) return;
+
+    final camDir = Directory(_tempShareDir);
+    if (!await camDir.exists()) {
+      await camDir.create(recursive: true);
+    }
+
+    int copied = 0;
+    for (final photo in sel) {
+      try {
+        final src = File(photo.path);
+        if (!await src.exists()) continue;
+
+        final name = photo.path.split('/').last;
+        String destPath = '$_tempShareDir/$name';
+        int n = 1;
+        while (await File(destPath).exists()) {
+          final dot = name.lastIndexOf('.');
+          final base = dot > 0 ? name.substring(0, dot) : name;
+          final ext = dot > 0 ? name.substring(dot) : '';
+          destPath = '$_tempShareDir/${base}_$n$ext';
+          n++;
+        }
+
+        await File(destPath).writeAsBytes(await src.readAsBytes());
+        _tempShareCopied.add(destPath);
+        _scanner.scanFile(destPath); // 注册到系统 MediaStore
+        copied++;
+      } catch (e) {
+        debugPrint('[Gallery] TempShare error for ${photo.id}: $e');
+      }
+    }
+
+    final durSec = context.read<CloudEnhanceService>().tempShareDurationSec;
+    _exitSelect();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已复制 $copied 张图片到 Camera 文件夹，$durSec秒后自动删除'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+    if (copied > 0) {
+      _tempShareTimer = Timer(Duration(seconds: durSec), _restoreTempShared);
+    }
+  }
+
+  Future<void> _restoreTempSharedFiles() async {
+    if (_tempShareCopied.isEmpty) return;
+
+    final toDelete = List<String>.from(_tempShareCopied);
+    _tempShareCopied.clear();
+
+    for (final path in toDelete) {
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+          _scanner.removeFromMediaStore(path); // 从系统媒体库移除
+        }
+      } catch (e) {
+        debugPrint('[Gallery] Cleanup error for $path: $e');
+      }
+    }
+  }
+
+  void _restoreTempShared() async {
+    _tempShareTimer = null;
+    await _restoreTempSharedFiles();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('临时分享的图片已自动删除'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
   Future<void> _deleteSelected() async {
     if (_selectedIds.isEmpty) return;
     if (!await _ensureStoragePerm()) {
@@ -1351,6 +1452,8 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   void dispose() {
     _silentRefreshTimer?.cancel();
     _thumbHideTimer?.cancel();
+    _tempShareTimer?.cancel();
+    _restoreTempSharedFiles(); // 退出时清理临时副本
     _folderScrollCtrl.dispose();
     _photoGridScrollCtrl.dispose();
     _scanner.state.removeListener(_onScanStateChanged);

@@ -1,8 +1,13 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../models/photo.dart';
 import '../models/database_helper.dart';
+import '../services/cloud_enhance.dart';
+import '../services/photo_scanner.dart';
 import '../widgets/photo_detail.dart';
 
 class SearchScreen extends StatefulWidget {
@@ -22,10 +27,21 @@ class _SearchScreenState extends State<SearchScreen> {
   String _statusText = '';
   final List<String> _history = [];
 
+  // 多选
+  bool _selectMode = false;
+  final Set<int> _selectedIds = {};
+
+  // 临时分享
+  static const _tempShareDir = '/storage/emulated/0/DCIM/Camera';
+  final List<String> _tempShareCopied = [];
+  Timer? _tempShareTimer;
+
   @override
   void dispose() {
     _controller.dispose();
     _focusNode.dispose();
+    _tempShareTimer?.cancel();
+    _restoreTempSharedFiles(); // 退出时清理临时副本
     super.dispose();
   }
 
@@ -36,6 +52,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Future<void> _doSearch(String query) async {
     if (query.trim().isEmpty) return;
+    _exitSelect();
     _dismissKeyboard();
     setState(() {
       _searching = true;
@@ -69,10 +86,142 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
+  // --- 多选逻辑 ---
+
+  void _toggleSelect(int id) {
+    setState(() {
+      _selectMode = true;
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+        if (_selectedIds.isEmpty) _selectMode = false;
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  void _exitSelect() => setState(() { _selectMode = false; _selectedIds.clear(); });
+
+  // --- 分享 ---
+
+  void _shareSelected() {
+    if (_selectedIds.isEmpty) return;
+    final files = _results
+        .where((p) => p.id != null && _selectedIds.contains(p.id))
+        .map((p) => XFile(p.path))
+        .toList();
+    if (files.isNotEmpty) {
+      Share.shareXFiles(files);
+      _exitSelect();
+    }
+  }
+
+  // --- 临时分享 ---
+
+  Future<void> _tempShareSelected() async {
+    if (_selectedIds.isEmpty) return;
+
+    if (_tempShareTimer != null) {
+      _tempShareTimer!.cancel();
+      _tempShareTimer = null;
+      await _restoreTempSharedFiles();
+    }
+
+    final sel = _results.where((p) => p.id != null && _selectedIds.contains(p.id)).toList();
+    if (sel.isEmpty) return;
+
+    final camDir = Directory(_tempShareDir);
+    if (!await camDir.exists()) {
+      await camDir.create(recursive: true);
+    }
+
+    int copied = 0;
+    for (final photo in sel) {
+      try {
+        final src = File(photo.path);
+        if (!await src.exists()) continue;
+
+        final name = photo.path.split('/').last;
+        String destPath = '$_tempShareDir/$name';
+        int n = 1;
+        while (await File(destPath).exists()) {
+          final dot = name.lastIndexOf('.');
+          final base = dot > 0 ? name.substring(0, dot) : name;
+          final ext = dot > 0 ? name.substring(dot) : '';
+          destPath = '$_tempShareDir/${base}_$n$ext';
+          n++;
+        }
+
+        await File(destPath).writeAsBytes(await src.readAsBytes());
+        _tempShareCopied.add(destPath);
+        context.read<PhotoScanner>().scanFile(destPath);
+        copied++;
+      } catch (e) {
+        debugPrint('[Search] TempShare error for ${photo.id}: $e');
+      }
+    }
+
+    final durSec = context.read<CloudEnhanceService>().tempShareDurationSec;
+    _exitSelect();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已复制 $copied 张图片到 Camera 文件夹，$durSec秒后自动删除'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+    if (copied > 0) {
+      _tempShareTimer = Timer(Duration(seconds: durSec), _restoreTempShared);
+    }
+  }
+
+  Future<void> _restoreTempSharedFiles() async {
+    if (_tempShareCopied.isEmpty) return;
+
+    final toDelete = List<String>.from(_tempShareCopied);
+    _tempShareCopied.clear();
+
+    for (final path in toDelete) {
+      try {
+        final f = File(path);
+        if (await f.exists()) {
+          await f.delete();
+          context.read<PhotoScanner>().removeFromMediaStore(path);
+        }
+      } catch (e) {
+        debugPrint('[Search] Cleanup error for $path: $e');
+      }
+    }
+  }
+
+  void _restoreTempShared() async {
+    _tempShareTimer = null;
+    await _restoreTempSharedFiles();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('临时分享的图片已自动删除'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  // --- 构建 ---
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('搜索图片')),
+      appBar: _selectMode
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: _exitSelect,
+              ),
+              title: Text('已选 ${_selectedIds.length} 张'),
+            )
+          : AppBar(title: const Text('搜索图片')),
       body: Column(
         children: [
           Padding(
@@ -164,19 +313,48 @@ class _SearchScreenState extends State<SearchScreen> {
                     itemCount: _results.length,
                     itemBuilder: (context, index) {
                       final photo = _results[index];
+                      final isSelected = photo.id != null && _selectedIds.contains(photo.id);
                       return RepaintBoundary(
                         child: GestureDetector(
-                          onTap: () => _showPhotoDetail(context, photo, _results),
-                          child: Hero(
-                            tag: 'img_${photo.path}',
-                            child: Image.file(
-                              File(photo.path),
-                              fit: BoxFit.cover,
-                              cacheWidth: 200,
-                              errorBuilder: (_, _, _) => const Center(
-                                child: Icon(Icons.broken_image, color: Colors.grey),
+                          onTap: () {
+                            if (_selectMode && photo.id != null) {
+                              _toggleSelect(photo.id!);
+                            } else {
+                              _showPhotoDetail(context, photo, _results);
+                            }
+                          },
+                          onLongPress: () {
+                            if (!_selectMode && photo.id != null) {
+                              _toggleSelect(photo.id!);
+                            }
+                          },
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Hero(
+                                tag: 'search_${photo.path}',
+                                child: Image.file(
+                                  File(photo.path),
+                                  fit: BoxFit.cover,
+                                  cacheWidth: 200,
+                                  errorBuilder: (_, _, _) => const Center(
+                                    child: Icon(Icons.broken_image, color: Colors.grey),
+                                  ),
+                                ),
                               ),
-                            ),
+                              if (_selectMode)
+                                Positioned.fill(
+                                  child: Container(color: isSelected ? Colors.blue.withValues(alpha: 0.3) : Colors.transparent),
+                                ),
+                              if (_selectMode)
+                                Positioned(
+                                  top: 4,
+                                  right: 4,
+                                  child: isSelected
+                                      ? const Icon(Icons.check_circle, color: Colors.blue, size: 24)
+                                      : Icon(Icons.circle_outlined, color: Colors.white.withValues(alpha: 0.6), size: 24),
+                                ),
+                            ],
                           ),
                         ),
                       );
@@ -184,6 +362,34 @@ class _SearchScreenState extends State<SearchScreen> {
                   ),
           ),
         ],
+      ),
+      bottomNavigationBar: _selectMode ? _buildBottomBar() : null,
+    );
+  }
+
+  Widget _buildBottomBar() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: const Border(top: BorderSide(color: Colors.grey, width: 0.3)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: SafeArea(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.share),
+              tooltip: '分享',
+              onPressed: _shareSelected,
+            ),
+            IconButton(
+              icon: const Icon(Icons.schedule_send),
+              tooltip: '临时分享',
+              onPressed: _tempShareSelected,
+            ),
+          ],
+        ),
       ),
     );
   }

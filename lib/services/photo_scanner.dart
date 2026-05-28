@@ -374,4 +374,22 @@ class PhotoScanner {
       return false;
     }
   }
+
+  /// 将新文件注册到系统 MediaStore，使其在其他 App 中可见
+  Future<void> scanFile(String filePath) async {
+    try {
+      await _channel.invokeMethod('scanFile', {'path': filePath});
+    } catch (e) {
+      debugPrint('[PhotoScanner] scanFile error: $e');
+    }
+  }
+
+  /// 从系统 MediaStore 中移除文件记录（文件已从磁盘删除后调用）
+  Future<void> removeFromMediaStore(String filePath) async {
+    try {
+      await _channel.invokeMethod('removeFromMediaStore', {'path': filePath});
+    } catch (e) {
+      debugPrint('[PhotoScanner] removeFromMediaStore error: $e');
+    }
+  }
 }
