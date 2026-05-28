@@ -129,7 +129,8 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+    // 只在 App 被销毁时清理，切后台（paused）不清理，否则切到微信发图就没文件了
+    if (state == AppLifecycleState.detached) {
       _tempShareTimer?.cancel();
       _tempShareTimer = null;
       _restoreTempSharedFiles();

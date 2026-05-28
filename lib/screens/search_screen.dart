@@ -44,7 +44,8 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+    // 只在 App 被销毁时清理，切后台（paused）不清理
+    if (state == AppLifecycleState.detached) {
       _tempShareTimer?.cancel();
       _tempShareTimer = null;
       _restoreTempSharedFiles();
