@@ -230,7 +230,7 @@ class _SearchScreenState extends State<SearchScreen> {
               controller: _controller,
               focusNode: _focusNode,
               decoration: InputDecoration(
-                hintText: '多个关键词用空格或逗号分隔，如"海滩 美食"、"猫，狗"',
+                hintText: '逗号/空格=且，句号=或。如"猫，橘。奶龙，黄"',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _controller.text.isNotEmpty
                     ? IconButton(

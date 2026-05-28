@@ -125,28 +125,43 @@ class DatabaseHelper {
   // ── 文件哈希去重 ────────────────────────────────────────
 
   // ── 关键词搜索 (LIKE) ──────────────────────────────────
-  // 空格 / 逗号(，,) 都作为分隔符，所有关键词 AND 匹配
-  // "黄色 奶龙" → 黄色 AND 奶龙（tags 或 ocr_text 都搜）
-  // "米老鼠，黄色" → 米老鼠 AND 黄色
+  // "。" 分隔多组查询，组间 OR；组内空格/逗号(，,) 分隔，组内 AND
+  // "猫，橘。奶龙，黄" → (猫 AND 橘) OR (奶龙 AND 黄)
+  // "黄色 奶龙"       → 黄色 AND 奶龙（单组，向后兼容）
 
   Future<List<int>> searchByKeyword(String query) async {
-    final words = query
-        .split(RegExp(r'[\s，,]+'))
-        .map((w) => w.trim())
-        .where((w) => w.isNotEmpty)
+    // 先按 。/。 拆分组（组间 OR）
+    final groups = query
+        .split(RegExp(r'[。]'))
+        .map((g) => g.trim())
+        .where((g) => g.isNotEmpty)
         .toList();
-    if (words.isEmpty) return [];
+    if (groups.isEmpty) return [];
 
-    final conditions = <String>[];
+    final groupConditions = <String>[];
     final args = <String>[];
 
-    for (final word in words) {
-      conditions.add('(tags LIKE ? OR ocr_text LIKE ?)');
-      args.add('%$word%');
-      args.add('%$word%');
+    for (final group in groups) {
+      // 组内按空格/逗号拆分（组内 AND）
+      final words = group
+          .split(RegExp(r'[\s，,]+'))
+          .map((w) => w.trim())
+          .where((w) => w.isNotEmpty)
+          .toList();
+      if (words.isEmpty) continue;
+
+      final wordConds = <String>[];
+      for (final word in words) {
+        wordConds.add('(tags LIKE ? OR ocr_text LIKE ?)');
+        args.add('%$word%');
+        args.add('%$word%');
+      }
+      groupConditions.add('(${wordConds.join(' AND ')})');
     }
 
-    final where = conditions.join(' AND ');
+    if (groupConditions.isEmpty) return [];
+
+    final where = groupConditions.join(' OR ');
 
     final rows = await _db.rawQuery('''
       SELECT id FROM photos
