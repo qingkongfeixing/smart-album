@@ -182,6 +182,94 @@ class _PhotoDetailViewState extends State<PhotoDetailView> {
     if (mounted) Navigator.pop(context);
   }
 
+  bool _tagExpanded = false;
+
+  Widget _buildTagStrip(bool isDark) {
+    final tagsStr = _currentPhoto.tags;
+    final tags = tagsStr != null
+        ? tagsStr.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
+        : <String>[];
+    final hasTags = tags.isNotEmpty;
+
+    final bg = isDark ? Colors.white12 : Colors.black54;
+    final fg = isDark ? Colors.white : Colors.white;
+
+    if (!hasTags) {
+      return Positioned(
+        left: 0, right: 0, bottom: 0,
+        child: AnimatedOpacity(
+          opacity: _barsVisible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 200),
+          child: GestureDetector(
+            onTap: _showEditSheet,
+            child: Container(
+              color: bg,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('无标签', style: TextStyle(fontSize: 12, color: fg.withAlpha(180))),
+                  const SizedBox(width: 4),
+                  Icon(Icons.edit, size: 14, color: fg.withAlpha(180)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: AnimatedOpacity(
+        opacity: _barsVisible ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 200),
+        child: Container(
+          color: bg,
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+          constraints: _tagExpanded
+              ? const BoxConstraints(maxHeight: 220)
+              : const BoxConstraints(maxHeight: 74),
+          child: SingleChildScrollView(
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                for (final t in tags)
+                  Chip(
+                    label: Text(t, style: TextStyle(fontSize: 12, color: fg)),
+                    backgroundColor: Colors.white.withAlpha(30),
+                    side: BorderSide.none,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    labelPadding: const EdgeInsets.symmetric(horizontal: 6),
+                  ),
+                // 展开/收起箭头
+                ActionChip(
+                  label: Icon(
+                    _tagExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                    size: 16,
+                    color: fg.withAlpha(200),
+                  ),
+                  backgroundColor: Colors.transparent,
+                  side: BorderSide.none,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  labelPadding: EdgeInsets.zero,
+                  onPressed: () => setState(() => _tagExpanded = !_tagExpanded),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _showInfo() {
     final name = _currentPhoto.path.split('/').last;
     final sizeKB = _fileSize > 0 ? '${(_fileSize / 1024).toStringAsFixed(1)} KB' : '计算中...';
@@ -240,45 +328,57 @@ class _PhotoDetailViewState extends State<PhotoDetailView> {
               ),
               actions: [
                 IconButton(
+                  icon: Icon(Icons.edit, color: fg),
+                  tooltip: '编辑标签',
+                  onPressed: _showEditSheet,
+                ),
+                IconButton(
                   icon: Icon(Icons.info_outline, color: fg),
                   onPressed: _showInfo,
                 ),
               ],
             )
           : null,
-      body: GestureDetector(
-        onTap: _toggleBars,
-        child: PageView.builder(
-          controller: _pageCtrl,
-          itemCount: widget.photos.length,
-          onPageChanged: (i) {
-            _transformCtrl.value = Matrix4.identity();
-            setState(() {
-              _currentIndex = i;
-              _fileSize = 0;
-              _isZoomed = false;
-            });
-            _loadFileSize();
-          },
-          itemBuilder: (context, index) {
-            return InteractiveViewer(
-              transformationController: _transformCtrl,
-              panEnabled: _isZoomed,
-              child: Hero(
-                tag: 'img_${widget.photos[index].path}',
-                child: Image.file(
-                  File(widget.photos[index].path),
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, _, _) => Icon(
-                    Icons.broken_image,
-                    color: isDark ? Colors.grey : Colors.grey.shade400,
-                    size: 48,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          GestureDetector(
+            onTap: _toggleBars,
+            child: PageView.builder(
+              controller: _pageCtrl,
+              itemCount: widget.photos.length,
+              onPageChanged: (i) {
+                _transformCtrl.value = Matrix4.identity();
+                setState(() {
+                  _currentIndex = i;
+                  _fileSize = 0;
+                  _isZoomed = false;
+                  _tagExpanded = false;
+                });
+                _loadFileSize();
+              },
+              itemBuilder: (context, index) {
+                return InteractiveViewer(
+                  transformationController: _transformCtrl,
+                  panEnabled: _isZoomed,
+                  child: Hero(
+                    tag: 'img_${widget.photos[index].path}',
+                    child: Image.file(
+                      File(widget.photos[index].path),
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, _, _) => Icon(
+                        Icons.broken_image,
+                        color: isDark ? Colors.grey : Colors.grey.shade400,
+                        size: 48,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            );
-          },
-        ),
+                );
+              },
+            ),
+          ),
+          if (_barsVisible) _buildTagStrip(isDark),
+        ],
       ),
       bottomNavigationBar: _barsVisible
           ? BottomAppBar(
@@ -290,11 +390,6 @@ class _PhotoDetailViewState extends State<PhotoDetailView> {
                     icon: Icon(Icons.share, color: fg),
                     tooltip: '分享',
                     onPressed: _share,
-                  ),
-                  IconButton(
-                    icon: Icon(Icons.edit, color: fg),
-                    tooltip: '编辑标签',
-                    onPressed: _showEditSheet,
                   ),
                   IconButton(
                     icon: _cloudLoading

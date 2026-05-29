@@ -124,6 +124,31 @@ class DatabaseHelper {
 
   // ── 文件哈希去重 ────────────────────────────────────────
 
+  // ── 标签聚合 ──────────────────────────────────────────
+
+  /// 返回所有不重复标签及其出现次数，按次数降序
+  Future<Map<String, int>> getAllTags() async {
+    final rows = await _db.rawQuery(
+      'SELECT tags FROM photos WHERE tags IS NOT NULL AND tags != \'\'',
+    );
+    final counts = <String, int>{};
+    for (final row in rows) {
+      final tagsStr = row['tags'] as String?;
+      if (tagsStr == null || tagsStr.isEmpty) continue;
+      for (final raw in tagsStr.split(',')) {
+        final tag = raw.trim();
+        if (tag.isNotEmpty && tag.length < 30) {
+          counts[tag] = (counts[tag] ?? 0) + 1;
+        }
+      }
+    }
+    // 按次数降序排列
+    final sorted = Map<String, int>.fromEntries(
+      counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value)),
+    );
+    return sorted;
+  }
+
   // ── 关键词搜索 (LIKE) ──────────────────────────────────
   // "。" 分隔多组查询，组间 OR；组内空格/逗号(，,) 分隔，组内 AND
   // "猫，橘。奶龙，黄" → (猫 AND 橘) OR (奶龙 AND 黄)

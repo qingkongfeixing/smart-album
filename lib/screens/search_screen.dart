@@ -27,6 +27,24 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
   String _statusText = '';
   final List<String> _history = [];
 
+  // 标签浏览
+  Map<String, int> _allTags = {};
+  bool _loadingTags = false;
+  final _tagFilterCtrl = TextEditingController();
+  static const int _tagPageSize = 100;
+
+  List<MapEntry<String, int>> get _filteredTags {
+    final filter = _tagFilterCtrl.text.trim().toLowerCase();
+    final entries = _allTags.entries.where((e) {
+      if (filter.isEmpty) return true;
+      return e.key.toLowerCase().contains(filter);
+    }).toList();
+    if (filter.isEmpty && entries.length > _tagPageSize) {
+      return entries.sublist(0, _tagPageSize);
+    }
+    return entries;
+  }
+
   // 多选
   bool _selectMode = false;
   final Set<int> _selectedIds = {};
@@ -41,6 +59,17 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _loadTags();
+  }
+
+  Future<void> _loadTags() async {
+    setState(() => _loadingTags = true);
+    try {
+      final tags = await _db.getAllTags();
+      if (mounted) setState(() { _allTags = tags; _loadingTags = false; });
+    } catch (e) {
+      if (mounted) setState(() => _loadingTags = false);
+    }
   }
 
   @override
@@ -65,6 +94,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
     _controller.dispose();
     _focusNode.dispose();
     _tempShareTimer?.cancel();
+    _tagFilterCtrl.dispose();
     _restoreTempSharedFiles(); // 退出时清理临时副本
     super.dispose();
   }
@@ -267,7 +297,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
                         icon: const Icon(Icons.clear),
                         onPressed: () {
                           _controller.clear();
-                          setState(() {});
+                          setState(() { _results = []; _statusText = ''; });
                         },
                       )
                     : null,
@@ -292,24 +322,6 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
                 ),
               ),
             ),
-          if (_history.isNotEmpty && _results.isEmpty && !_searching)
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: _history
-                    .take(10)
-                    .map((h) => ActionChip(
-                          label: Text(h),
-                          onPressed: () {
-                            _controller.text = h;
-                            _doSearch(h);
-                          },
-                        ))
-                    .toList(),
-              ),
-            ),
           if (_searching)
             const Padding(
               padding: EdgeInsets.all(16),
@@ -329,9 +341,7 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
             ),
           Expanded(
             child: _results.isEmpty && !_searching
-                ? const Center(
-                    child: Text('输入关键词搜索',
-                        style: TextStyle(color: Colors.grey, fontSize: 16)))
+                ? _buildIdleBody()
                 : GridView.builder(
                     padding: const EdgeInsets.all(4),
                     gridDelegate:
@@ -394,6 +404,145 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
         ],
       ),
       bottomNavigationBar: _selectMode ? _buildBottomBar() : null,
+    );
+  }
+
+  Widget _buildIdleBody() {
+    return CustomScrollView(
+      slivers: [
+        // 搜索历史
+        if (_history.isNotEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: _history
+                    .take(10)
+                    .map((h) => ActionChip(
+                          label: Text(h, style: const TextStyle(fontSize: 13)),
+                          onPressed: () {
+                            _controller.text = h;
+                            _doSearch(h);
+                          },
+                        ))
+                    .toList(),
+              ),
+            ),
+          ),
+        // 标签云
+        if (_loadingTags)
+          const SliverFillRemaining(
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_allTags.isNotEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 标题
+                  Row(
+                    children: [
+                      Text('全部标签（${_allTags.length}）',
+                          style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.w500)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  // 标签筛选
+                  SizedBox(
+                    height: 36,
+                    child: TextField(
+                      controller: _tagFilterCtrl,
+                      onChanged: (_) => setState(() {}),
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        hintText: '筛选标签...',
+                        hintStyle: const TextStyle(fontSize: 13),
+                        prefixIcon: const Icon(Icons.filter_list, size: 18),
+                        suffixIcon: _tagFilterCtrl.text.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear, size: 18),
+                                onPressed: () {
+                                  _tagFilterCtrl.clear();
+                                  setState(() {});
+                                },
+                              )
+                            : null,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        filled: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // 计数提示
+                  if (_allTags.length > _tagPageSize && _tagFilterCtrl.text.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text('显示前 $_tagPageSize 个高频标签，输入文字可筛选更多',
+                          style: TextStyle(fontSize: 12, color: Colors.grey[500])),
+                    ),
+                  _buildTagCloud(),
+                ],
+              ),
+            ),
+          )
+        else
+          const SliverFillRemaining(
+            child: Center(
+                child: Text('暂无标签，请先扫描图片并等待云端分析完成',
+                    style: TextStyle(color: Colors.grey, fontSize: 15))),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildTagCloud() {
+    final tags = _filteredTags;
+    if (tags.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Center(
+          child: Text(_tagFilterCtrl.text.isNotEmpty ? '无匹配标签' : '',
+              style: const TextStyle(color: Colors.grey, fontSize: 14)),
+        ),
+      );
+    }
+
+    final maxCount = tags.first.value;
+    final minCount = tags.last.value;
+    final range = maxCount > minCount ? maxCount - minCount : 1;
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: tags.map((e) {
+        final fontSize = 12.0 + (e.value - minCount) / range * 6.0;
+        return ActionChip(
+          label: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(e.key,
+                  style: TextStyle(fontSize: fontSize.clamp(12.0, 18.0))),
+              const SizedBox(width: 2),
+              Text('${e.value}',
+                  style: TextStyle(
+                      fontSize: (fontSize * 0.75).clamp(9.0, 12.0),
+                      color: Colors.grey)),
+            ],
+          ),
+          onPressed: () {
+            _controller.text = e.key;
+            _doSearch(e.key);
+          },
+        );
+      }).toList(),
     );
   }
 
