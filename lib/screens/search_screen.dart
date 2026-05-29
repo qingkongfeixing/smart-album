@@ -567,10 +567,57 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
               tooltip: '临时分享',
               onPressed: _tempShareSelected,
             ),
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              tooltip: '删除',
+              onPressed: _deleteSelected,
+            ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _deleteSelected() async {
+    if (_selectedIds.isEmpty) return;
+    final count = _selectedIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('确认删除'),
+        content: Text('将删除选中的 $count 张图片，此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    int deleted = 0;
+    for (final photo in _results.toList()) {
+      if (photo.id != null && _selectedIds.contains(photo.id)) {
+        try {
+          final file = File(photo.path);
+          if (await file.exists()) await file.delete();
+        } catch (_) {}
+        await _db.deletePhoto(photo.id!);
+        _results.remove(photo);
+        deleted++;
+      }
+    }
+    _exitSelect();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除 $deleted 张图片')),
+      );
+    }
   }
 
   void _showPhotoDetail(BuildContext context, Photo photo, List<Photo> list) {
