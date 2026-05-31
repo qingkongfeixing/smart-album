@@ -36,7 +36,67 @@ class PhotoScanner {
 
   void cancel() {
     _cancelled = true;
+    _cloudService.cancelHttpRequests();
+    _stopForeground(); // fire-and-forget
     debugPrint('[PhotoScanner] Cancel requested');
+  }
+
+  /// 将 App 退到后台（扫描中按返回时使用）
+  Future<void> moveToBackground() async {
+    try {
+      await _channel.invokeMethod('moveTaskToBack');
+    } catch (e) {
+      debugPrint('[PhotoScanner] moveTaskToBack failed: $e');
+    }
+  }
+
+  /// 启动原生前台 Service，保护进程在后台不被杀死
+  Future<bool> _startForeground({
+    required String title,
+    required String body,
+    required int progress,
+    required int maxProgress,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod<bool>('startForegroundService', {
+        'title': title,
+        'body': body,
+        'progress': progress,
+        'maxProgress': maxProgress,
+      });
+      return result ?? false;
+    } catch (e) {
+      debugPrint('[PhotoScanner] Failed to start foreground service: $e');
+      return false;
+    }
+  }
+
+  /// 更新前台 Service 通知的进度
+  Future<void> _updateForeground({
+    required String title,
+    required String body,
+    required int progress,
+    required int maxProgress,
+  }) async {
+    try {
+      await _channel.invokeMethod('updateForegroundProgress', {
+        'title': title,
+        'body': body,
+        'progress': progress,
+        'maxProgress': maxProgress,
+      });
+    } catch (e) {
+      debugPrint('[PhotoScanner] Failed to update foreground progress: $e');
+    }
+  }
+
+  /// 停止前台 Service
+  Future<void> _stopForeground() async {
+    try {
+      await _channel.invokeMethod('stopForegroundService');
+    } catch (e) {
+      debugPrint('[PhotoScanner] Failed to stop foreground service: $e');
+    }
   }
 
   /// 通过原生 MediaStore ContentResolver 直接查询（毫秒级）
@@ -88,6 +148,7 @@ class PhotoScanner {
       debugPrint('[PhotoScanner] Scan error: $e');
       _state.value = ScanState.error;
       _scanning = false;
+      _stopForeground(); // fire-and-forget
       return 0;
     }
   }
@@ -113,6 +174,7 @@ class PhotoScanner {
       debugPrint('[PhotoScanner] Scan folder error: $e');
       _state.value = ScanState.error;
       _scanning = false;
+      _stopForeground(); // fire-and-forget
       return 0;
     }
   }
@@ -135,6 +197,14 @@ class PhotoScanner {
     int lastNotifyAt = 0;
     final pendingCloud = <Map<String, dynamic>>[];
 
+    _onProgress.value = ScanProgress(0, total, '扫描中...');
+    await _startForeground(
+      title: '扫描相册中',
+      body: '准备扫描 $total 张图片...',
+      progress: 0,
+      maxProgress: total,
+    );
+
     for (int i = 0; i < images.length; i++) {
       final img = images[i];
       final path = img['path'] as String?;
@@ -144,8 +214,7 @@ class PhotoScanner {
 
       if (i - lastNotifyAt >= 50 || i == total - 1) {
         lastNotifyAt = i;
-        notify.showProgress(
-          id: 1,
+        _updateForeground(
           title: '扫描相册中',
           body: '${i + 1}/$total',
           progress: i + 1,
@@ -198,6 +267,8 @@ class PhotoScanner {
     if (movedPaths.isNotEmpty) {
       debugPrint('[PhotoScanner] Moved files matched: ${movedPaths.length}');
     }
+
+    await _stopForeground();
 
     notify.showCompleted(
       id: 1,
@@ -263,16 +334,13 @@ class PhotoScanner {
       return '请先在设置中至少配置一个模型';
     }
 
-    // 立即显示初始通知
+    // 启动前台 Service + 初始通知
     final modelNames = models.map((m) => m.modelName).join(', ');
-    await notify.showProgress(
-      id: 0,
+    await _startForeground(
       title: title,
       body: '准备上传 ${valid.length} 张图片...',
       progress: 0,
       maxProgress: valid.length,
-      channelId: NotificationService.cloudChannelId,
-      channelName: '云端解析',
     );
 
     // 轮询分配图片到各模型
@@ -292,61 +360,63 @@ class PhotoScanner {
       if (now - lastNotifyMs < 300 && total < valid.length) return;
       lastNotifyMs = now;
 
-      notify.showProgress(
-        id: 0,
+      _updateForeground(
         title: '$title [$modelNames]',
         body: '$total/${valid.length} ${photo.path.split('/').last}',
         progress: total,
         maxProgress: valid.length,
-        channelId: NotificationService.cloudChannelId,
-        channelName: '云端解析',
       );
     }
 
     // 所有模型并行处理
-    await Future.wait(modelQueues.asMap().entries.map((entry) async {
-      final queue = entry.value;
-      final model = models[entry.key];
+    try {
+      await Future.wait(modelQueues.asMap().entries.map((entry) async {
+        final queue = entry.value;
+        final model = models[entry.key];
 
-      for (int i = 0; i < queue.length && !_cancelled; i += concurrency) {
-        final batch = queue.skip(i).take(concurrency).toList();
-        final results = await Future.wait(batch.map((p) async {
-          try {
-            final result =
-                await _cloudService.analyzeImage(p.path, model: model);
-            return (p, result, null);
-          } catch (e) {
-            return (p, null, e.toString());
+        for (int i = 0; i < queue.length && !_cancelled; i += concurrency) {
+          final batch = queue.skip(i).take(concurrency).toList();
+          final results = await Future.wait(batch.map((p) async {
+            try {
+              final result =
+                  await _cloudService.analyzeImage(p.path, model: model);
+              return (p, result, null);
+            } catch (e) {
+              return (p, null, e.toString());
+            }
+          }));
+
+          for (final (photo, result, error) in results) {
+            if (error != null) {
+              failed++;
+              lastError = error.replaceFirst(RegExp(r'^Exception: '), '');
+              continue;
+            }
+            if (result == null) continue;
+
+            final cloudTags = result['tags'] ?? '';
+            final existingTags = photo.tags ?? '';
+            final searchTags = [
+              if (existingTags.isNotEmpty) existingTags,
+              if (cloudTags.isNotEmpty) cloudTags,
+            ].where((s) => s.isNotEmpty).join(', ');
+            await _db.updatePhoto(photo.copyWith(tags: searchTags));
+            success++;
+
+            updateProgress(photo);
           }
-        }));
-
-        for (final (photo, result, error) in results) {
-          if (error != null) {
-            failed++;
-            lastError = error.replaceFirst(RegExp(r'^Exception: '), '');
-            continue;
-          }
-          if (result == null) continue;
-
-          final cloudTags = result['tags'] ?? '';
-          final existingTags = photo.tags ?? '';
-          final searchTags = [
-            if (existingTags.isNotEmpty) existingTags,
-            if (cloudTags.isNotEmpty) cloudTags,
-          ].where((s) => s.isNotEmpty).join(', ');
-          await _db.updatePhoto(photo.copyWith(tags: searchTags));
-          success++;
-
-          updateProgress(photo);
         }
-      }
-    }));
+      }));
+    } finally {
+      await _stopForeground();
+    }
 
     final body = failed == 0
         ? '解析完成，成功 $success 张'
         : success > 0
             ? '解析完成，成功 $success 张，失败 $failed 张'
             : '解析失败${lastError != null ? "：$lastError" : ""}';
+
     await notify.showCompleted(
       id: 0,
       title: '${title}完成',

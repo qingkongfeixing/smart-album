@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application
         android:label="随搜相册"
         android:name="${applicationName}"
@@ -41,6 +43,10 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <service
+            android:name=".ScanForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

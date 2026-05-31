@@ -52,6 +52,17 @@ class CloudEnhanceService {
     models = [ModelConfig()];
   }
 
+  // HTTP 取消支持
+  http.Client? _activeClient;
+  bool _httpCancelled = false;
+
+  /// 取消正在进行的 HTTP 请求（扫描/解析停止时调用）
+  void cancelHttpRequests() {
+    _httpCancelled = true;
+    _activeClient?.close();
+    _activeClient = null;
+  }
+
   bool get isEnabled => models.any((m) => m.isEnabled);
 
   /// 第一个可用模型的 apiKey（向后兼容）
@@ -182,8 +193,12 @@ class CloudEnhanceService {
     final imageUrl = await _imageToBase64Url(imagePath);
     if (imageUrl == null) throw Exception('图片压缩或编码失败');
 
-    final client = http.Client();
+    _httpCancelled = false;
+    _activeClient?.close();
+    _activeClient = http.Client();
+    final client = _activeClient!;
     try {
+      if (_httpCancelled) throw Exception('已取消');
       final response = await client.post(
         Uri.parse(cfg.apiBaseUrl),
         headers: {

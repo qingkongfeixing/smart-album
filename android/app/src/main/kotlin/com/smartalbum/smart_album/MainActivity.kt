@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import androidx.core.content.ContextCompat
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -69,6 +70,57 @@ class MainActivity : FlutterActivity() {
                         result.success(deleted > 0)
                     } catch (e: Exception) {
                         result.error("DELETE_ERROR", e.message, null)
+                    }
+                } else if (call.method == "startForegroundService") {
+                    try {
+                        val title = call.argument<String>("title") ?: "扫描中..."
+                        val body  = call.argument<String>("body")  ?: "准备中..."
+                        val progress = call.argument<Int>("progress") ?: 0
+                        val maxProgress = call.argument<Int>("maxProgress") ?: 0
+
+                        val intent = Intent(this@MainActivity, ScanForegroundService::class.java).apply {
+                            putExtra("title", title)
+                            putExtra("body", body)
+                            putExtra("progress", progress)
+                            putExtra("maxProgress", maxProgress)
+                        }
+                        ContextCompat.startForegroundService(this@MainActivity, intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("FOREGROUND_SERVICE_ERROR", e.message, null)
+                    }
+                } else if (call.method == "updateForegroundProgress") {
+                    try {
+                        val title = call.argument<String>("title") ?: "扫描中..."
+                        val body  = call.argument<String>("body")  ?: ""
+                        val progress = call.argument<Int>("progress") ?: 0
+                        val maxProgress = call.argument<Int>("maxProgress") ?: 0
+
+                        ScanForegroundService.updateProgress(
+                            this@MainActivity, title, body, progress, maxProgress
+                        )
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("FOREGROUND_UPDATE_ERROR", e.message, null)
+                    }
+                } else if (call.method == "stopForegroundService") {
+                    try {
+                        val svc = ScanForegroundService.instance
+                        if (svc != null) {
+                            svc.stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
+                            svc.stopSelf()
+                        }
+                        ScanForegroundService.instance = null
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("FOREGROUND_STOP_ERROR", e.message, null)
+                    }
+                } else if (call.method == "moveTaskToBack") {
+                    try {
+                        moveTaskToBack(true)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("MOVE_BACK_ERROR", e.message, null)
                     }
                 } else {
                     result.notImplemented()

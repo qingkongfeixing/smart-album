@@ -648,11 +648,15 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
           _goBackToFolders();
           return;
         }
-        // 主页：再按一次退出
+        // 主页：再按一次退出（扫描中则退到后台）
         final now = DateTime.now();
         if (_lastBackPress != null &&
             now.difference(_lastBackPress!) < const Duration(seconds: 2)) {
-          SystemNavigator.pop();
+          if (_scanner.state.value == ScanState.scanning) {
+            _scanner.moveToBackground();
+          } else {
+            SystemNavigator.pop();
+          }
         } else {
           _lastBackPress = now;
           ScaffoldMessenger.of(context).showSnackBar(
