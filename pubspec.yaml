@@ -1,7 +1,7 @@
 name: smart_album
 description: 随搜相册 - 支持AI图片语义搜索的本地相册应用
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.12.0

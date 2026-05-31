@@ -1,6 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/cloud_enhance.dart';
 import '../services/photo_scanner.dart';
 import '../models/database_helper.dart';
@@ -16,6 +20,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   int _photoCount = 0;
   bool _scanning = false;
   bool _cloudExpanded = false;
+  bool _debugExpanded = false;
+  bool _debugUnlocked = false;
+  int _debugTapCount = 0;
   List<String> _allFolders = [];
   int _modelCount = 0;
 
@@ -24,6 +31,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _loadStats();
     _modelCount = context.read<CloudEnhanceService>().models.length;
+    SharedPreferences.getInstance().then((prefs) {
+      if (mounted) {
+        setState(() => _debugUnlocked = prefs.getBool('debug_unlocked') ?? false);
+      }
+    });
   }
 
   Future<void> _loadStats() async {
@@ -214,6 +226,106 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  void _showPromptEditorDialog(CloudEnhanceService cloud) {
+    final controller = TextEditingController(text: cloud.effectivePrompt);
+    showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return AlertDialog(
+            title: const Text('编辑分析提示词'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '提示词用于指导 AI 如何分析图片。修改为空将恢复默认。',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText: '输入自定义提示词...',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '当前字数：${controller.text.length}',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('取消'),
+              ),
+              OutlinedButton(
+                onPressed: () {
+                  controller.text = cloud.defaultPrompt;
+                  setDialogState(() {});
+                },
+                child: const Text('重置为默认'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  await cloud.setCustomPrompt(controller.text.trim());
+                  if (mounted) {
+                    setState(() {});
+                    Navigator.pop(context);
+                  }
+                },
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _showClearLogsDialog(CloudEnhanceService cloud) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('清空调试日志'),
+        content: const Text('确认清空所有调试日志？此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              await cloud.clearFailureLogs();
+              if (mounted) {
+                setState(() {});
+                Navigator.pop(context);
+              }
+            },
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDebugLogsScreen(CloudEnhanceService cloud) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => _DebugLogsScreen(cloud: cloud)),
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
   @override
   void dispose() {
     super.dispose();
@@ -249,6 +361,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
             leading: const Icon(Icons.photo_library),
             title: const Text('已索引图片'),
             trailing: Text('$_photoCount 张'),
+            onTap: () {
+              if (_debugUnlocked) return;
+              _debugTapCount++;
+              if (_debugTapCount >= 5) {
+                _debugUnlocked = true;
+                SharedPreferences.getInstance()
+                    .then((p) => p.setBool('debug_unlocked', true));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('调试模式已启用'),
+                    duration: Duration(seconds: 1),
+                  ),
+                );
+                setState(() {});
+              }
+            },
           ),
           ListTile(
             leading: const Icon(Icons.schedule_send),
@@ -343,6 +471,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),
           ),
+          if (_debugUnlocked) ...[
+            const Divider(),
+            const _SectionHeader('调试'),
+            InkWell(
+              onTap: () => setState(() => _debugExpanded = !_debugExpanded),
+              child: ListTile(
+                leading: const Icon(Icons.bug_report),
+                title: const Text('调试选项'),
+                subtitle: Text(cloudService.debugEnabled ? '已启用' : '已关闭'),
+                trailing: Icon(
+                    _debugExpanded ? Icons.expand_less : Icons.expand_more),
+              ),
+            ),
+          ],
+          if (_debugUnlocked && _debugExpanded) ...[
+            SwitchListTile(
+              secondary: const Icon(Icons.track_changes),
+              title: const Text('启用调试日志'),
+              subtitle: const Text('开启后记录云端解析详情（含成功/失败）'),
+              value: cloudService.debugEnabled,
+              onChanged: (v) {
+                cloudService.setDebugEnabled(v);
+                setState(() {});
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.text_fields),
+              title: const Text('编辑分析提示词'),
+              subtitle: Text(cloudService.effectivePrompt.length > 60
+                  ? '${cloudService.effectivePrompt.substring(0, 60)}...'
+                  : cloudService.effectivePrompt),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showPromptEditorDialog(cloudService),
+            ),
+            ListTile(
+              leading: const Icon(Icons.article),
+              title: const Text('查看调试日志'),
+              subtitle: Text(cloudService.failureLogs.isEmpty
+                  ? '暂无日志'
+                  : '共 ${cloudService.failureLogs.length} 条记录'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: cloudService.failureLogs.isEmpty
+                  ? null
+                  : () => _showDebugLogsScreen(cloudService),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_sweep, color: Colors.red),
+              title: const Text('清空调试日志',
+                  style: TextStyle(color: Colors.red)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: cloudService.failureLogs.isEmpty
+                  ? null
+                  : () => _showClearLogsDialog(cloudService),
+            ),
+          ],
         ],
       ),
     );
@@ -526,6 +709,214 @@ class _ModelConfigCardState extends State<_ModelConfigCard> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _DebugLogsScreen extends StatelessWidget {
+  final CloudEnhanceService cloud;
+  const _DebugLogsScreen({required this.cloud});
+
+  static Future<void> _exportLogs(
+      BuildContext context, CloudEnhanceService cloud) async {
+    final buf = StringBuffer();
+    buf.writeln('=== 随搜相册 调试日志 ===');
+    buf.writeln('导出时间: ${DateTime.now().toString().substring(0, 19)}');
+    buf.writeln('共 ${cloud.failureLogs.length} 条记录');
+    buf.writeln('');
+
+    for (int i = 0; i < cloud.failureLogs.length; i++) {
+      final e = cloud.failureLogs[i];
+      final time =
+          '${e.timestamp.month.toString().padLeft(2, '0')}-${e.timestamp.day.toString().padLeft(2, '0')} '
+          '${e.timestamp.hour.toString().padLeft(2, '0')}:${e.timestamp.minute.toString().padLeft(2, '0')}:${e.timestamp.second.toString().padLeft(2, '0')}';
+      buf.writeln('--- [$i] ${e.isSuccess ? "成功" : "失败"} $time ---');
+      buf.writeln('图片: ${e.imagePath}');
+      buf.writeln('模型: ${e.modelName}');
+      if (e.httpStatusCode != null) buf.writeln('HTTP: ${e.httpStatusCode}');
+      if (e.errorMessage.isNotEmpty) buf.writeln('错误: ${e.errorMessage}');
+      if (e.parsedTags != null && e.parsedTags!.isNotEmpty) {
+        buf.writeln('标签: ${e.parsedTags}');
+      }
+      if (e.rawAIResponse != null && e.rawAIResponse!.isNotEmpty) {
+        buf.writeln('AI 返回: ${e.rawAIResponse}');
+      }
+      if (e.responseBody != null && e.responseBody!.isNotEmpty) {
+        buf.writeln('响应体: ${e.responseBody}');
+      }
+      buf.writeln('');
+    }
+
+    try {
+      final dir = Directory.systemTemp;
+      final file = File(
+          '${dir.path}/debug_logs_${DateTime.now().millisecondsSinceEpoch}.txt');
+      await file.writeAsString(buf.toString());
+      await Share.shareXFiles([XFile(file.path)],
+          text: '随搜相册调试日志');
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导出失败: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('调试日志'),
+        actions: [
+          if (cloud.failureLogs.isNotEmpty) ...[
+            IconButton(
+              icon: const Icon(Icons.share),
+              tooltip: '导出',
+              onPressed: () => _exportLogs(context, cloud),
+            ),
+            IconButton(
+              icon: const Icon(Icons.delete_sweep),
+              tooltip: '清空',
+              onPressed: () async {
+                await cloud.clearFailureLogs();
+                if (context.mounted) {
+                  Navigator.pop(context);
+                }
+              },
+            ),
+          ],
+        ],
+      ),
+      body: cloud.failureLogs.isEmpty
+          ? const Center(
+              child: Text('暂无日志', style: TextStyle(color: Colors.grey)),
+            )
+          : ListView.separated(
+              itemCount: cloud.failureLogs.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final entry = cloud.failureLogs[index];
+                return _DebugLogEntryCard(entry: entry);
+              },
+            ),
+    );
+  }
+}
+
+class _DebugLogEntryCard extends StatelessWidget {
+  final DebugLogEntry entry;
+  const _DebugLogEntryCard({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final time =
+        '${entry.timestamp.month.toString().padLeft(2, '0')}-${entry.timestamp.day.toString().padLeft(2, '0')} '
+        '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')}:${entry.timestamp.second.toString().padLeft(2, '0')}';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header: status + time
+            Row(
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: entry.isSuccess
+                        ? Colors.green.shade50
+                        : Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: entry.isSuccess ? Colors.green : Colors.red,
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Text(
+                    entry.isSuccess ? '成功' : '失败',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: entry.isSuccess ? Colors.green : Colors.red,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                Text(time, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // Info rows
+            _infoRow('图片', entry.imagePath.split('/').last),
+            _infoRow('路径', entry.imagePath),
+            _infoRow('模型', entry.modelName),
+            if (entry.httpStatusCode != null)
+              _infoRow('HTTP 状态', '${entry.httpStatusCode}'),
+            if (entry.errorMessage.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              const Text('错误信息',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              const SizedBox(height: 2),
+              SelectableText(
+                entry.errorMessage,
+                style: const TextStyle(fontSize: 13, color: Colors.red),
+              ),
+            ],
+            if (entry.parsedTags != null && entry.parsedTags!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text('解析标签',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              const SizedBox(height: 2),
+              SelectableText(entry.parsedTags!,
+                  style: const TextStyle(fontSize: 13)),
+            ],
+            if (entry.rawAIResponse != null &&
+                entry.rawAIResponse!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text('AI 原始返回',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              const SizedBox(height: 2),
+              SelectableText(entry.rawAIResponse!,
+                  style: const TextStyle(fontSize: 13, color: Colors.grey)),
+            ],
+            if (entry.responseBody != null &&
+                entry.responseBody!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text('API 响应体',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              const SizedBox(height: 2),
+              SelectableText(entry.responseBody!,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 60,
+            child: Text(label,
+                style:
+                    const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          ),
+          Expanded(
+            child: SelectableText(value,
+                style: const TextStyle(fontSize: 13)),
+          ),
+        ],
       ),
     );
   }

@@ -41,12 +41,50 @@ class CloudEnhanceService {
   static const _keyModelName = 'cloud_model_name';
   static const _keyApiBaseUrl = 'cloud_api_base_url';
   static const _keyApiKey = 'cloud_api_key';
+  static const _keyCustomPrompt = 'custom_prompt';
+  static const _keyDebugEnabled = 'debug_enabled';
+  static const _keyFailureLogs = 'failure_logs';
 
   static const int maxModels = 5;
+  static const int _maxLogEntries = 50;
+
+  static const String _defaultPrompt = '详细分析这张图片，生成搜索关键词标签，逗号分隔。\n'
+      '\n'
+      '必须包含以下维度：\n'
+      '1. 场景/地点/氛围：如 室内, 户外, 海滩, 夜晚, 雨天, 夕阳\n'
+      '2. 主要物体/元素：如 汽车, 蛋糕, 书本, 手机, 花朵\n'
+      '3. 人物特征（有人物时必写）：\n'
+      '   - 性别/年龄：如 少女, 青年男性, 老人, 小孩\n'
+      '   - 发色/发型：如 金发, 黑长直, 短发, 双马尾, 白发\n'
+      '   - 瞳色：如 蓝瞳, 红瞳, 绿瞳\n'
+      '   - 服装：如 校服, 连衣裙, 西装, 和服, 卫衣, 泳装\n'
+      '   - 配饰：如 眼镜, 耳机, 帽子, 耳环\n'
+      '   - 姿态/动作：如 微笑, 挥手, 奔跑, 坐姿, 回头\n'
+      '4. 角色名（确定认识时写）：如 初音未来, 哆啦A梦, 路飞\n'
+      '5. 图中文字（OCR）：所有出现的文字逐条写出\n'
+      '6. 主色调：如 蓝色调, 暖色调, 黑白\n'
+      '\n'
+      '规则：\n'
+      '- 只输出标签，逗号分隔，不要序号、解释、换行\n'
+      '- 每个标签尽量具体，如用"粉色连衣裙"而非"衣服"\n'
+      '- 不确定的特征不要编造';
 
   List<ModelConfig> models = [];
   Set<String> excludedFolders = {};
   int tempShareDurationSec = 10;
+
+  String? _customPrompt;
+  bool debugEnabled = false;
+  List<DebugLogEntry> failureLogs = [];
+
+  /// 获取当前生效的提示词（自定义 > 默认）
+  String get effectivePrompt =>
+      (_customPrompt != null && _customPrompt!.trim().isNotEmpty)
+          ? _customPrompt!
+          : _defaultPrompt;
+
+  /// 获取默认提示词（供 UI 重置用）
+  String get defaultPrompt => _defaultPrompt;
 
   CloudEnhanceService() {
     models = [ModelConfig()];
@@ -95,6 +133,21 @@ class CloudEnhanceService {
     tempShareDurationSec = prefs.getInt(_keyTempShareDuration) ?? 10;
     final excluded = prefs.getStringList(_keyExcludedFolders) ?? [];
     excludedFolders = excluded.toSet();
+
+    // 调试设置
+    _customPrompt = prefs.getString(_keyCustomPrompt);
+    debugEnabled = prefs.getBool(_keyDebugEnabled) ?? false;
+    final logsJson = prefs.getString(_keyFailureLogs);
+    if (logsJson != null && logsJson.isNotEmpty) {
+      try {
+        final list = jsonDecode(logsJson) as List<dynamic>;
+        failureLogs = list
+            .map((e) => DebugLogEntry.fromJson(e as Map<String, dynamic>))
+            .toList();
+      } catch (_) {
+        failureLogs = [];
+      }
+    }
   }
 
   ModelConfig _migrateLegacy(SharedPreferences prefs) {
@@ -124,6 +177,42 @@ class CloudEnhanceService {
     tempShareDurationSec = seconds;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_keyTempShareDuration, seconds);
+  }
+
+  Future<void> setCustomPrompt(String? prompt) async {
+    _customPrompt = (prompt != null && prompt.trim().isNotEmpty) ? prompt : null;
+    final prefs = await SharedPreferences.getInstance();
+    if (_customPrompt != null) {
+      await prefs.setString(_keyCustomPrompt, _customPrompt!);
+    } else {
+      await prefs.remove(_keyCustomPrompt);
+    }
+  }
+
+  Future<void> setDebugEnabled(bool enabled) async {
+    debugEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyDebugEnabled, enabled);
+  }
+
+  Future<void> addFailureLog(DebugLogEntry entry) async {
+    failureLogs.insert(0, entry);
+    if (failureLogs.length > _maxLogEntries) {
+      failureLogs = failureLogs.sublist(0, _maxLogEntries);
+    }
+    await _saveFailureLogs();
+  }
+
+  Future<void> clearFailureLogs() async {
+    failureLogs.clear();
+    await _saveFailureLogs();
+  }
+
+  Future<void> _saveFailureLogs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        _keyFailureLogs,
+        jsonEncode(failureLogs.map((e) => e.toJson()).toList()));
   }
 
   Future<void> removeExcludedFolder(String folderPath) async {
@@ -193,10 +282,13 @@ class CloudEnhanceService {
     final imageUrl = await _imageToBase64Url(imagePath);
     if (imageUrl == null) throw Exception('图片压缩或编码失败');
 
-    _httpCancelled = false;
-    _activeClient?.close();
-    _activeClient = http.Client();
-    final client = _activeClient!;
+    // 每个请求使用独立的 http.Client，避免并发请求互相取消
+    final client = http.Client();
+
+    int? lastStatusCode;
+    String? lastResponseBody;
+    String? rawContent;
+
     try {
       if (_httpCancelled) throw Exception('已取消');
       final response = await client.post(
@@ -217,32 +309,16 @@ class CloudEnhanceService {
                 },
                 {
                   'type': 'text',
-                  'text': '详细分析这张图片，生成搜索关键词标签，逗号分隔。\n'
-                      '\n'
-                      '必须包含以下维度：\n'
-                      '1. 场景/地点/氛围：如 室内, 户外, 海滩, 夜晚, 雨天, 夕阳\n'
-                      '2. 主要物体/元素：如 汽车, 蛋糕, 书本, 手机, 花朵\n'
-                      '3. 人物特征（有人物时必写）：\n'
-                      '   - 性别/年龄：如 少女, 青年男性, 老人, 小孩\n'
-                      '   - 发色/发型：如 金发, 黑长直, 短发, 双马尾, 白发\n'
-                      '   - 瞳色：如 蓝瞳, 红瞳, 绿瞳\n'
-                      '   - 服装：如 校服, 连衣裙, 西装, 和服, 卫衣, 泳装\n'
-                      '   - 配饰：如 眼镜, 耳机, 帽子, 耳环\n'
-                      '   - 姿态/动作：如 微笑, 挥手, 奔跑, 坐姿, 回头\n'
-                      '4. 角色名（确定认识时写）：如 初音未来, 哆啦A梦, 路飞\n'
-                      '5. 图中文字（OCR）：所有出现的文字逐条写出\n'
-                      '6. 主色调：如 蓝色调, 暖色调, 黑白\n'
-                      '\n'
-                      '规则：\n'
-                      '- 只输出标签，逗号分隔，不要序号、解释、换行\n'
-                      '- 每个标签尽量具体，如用"粉色连衣裙"而非"衣服"\n'
-                      '- 不确定的特征不要编造',
+                  'text': effectivePrompt,
                 },
               ],
             },
           ],
         }),
       ).timeout(const Duration(seconds: 30));
+
+      lastStatusCode = response.statusCode;
+      lastResponseBody = response.body;
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -252,7 +328,22 @@ class CloudEnhanceService {
             .where((s) => s != null && s.isNotEmpty)
             .join('\n');
         if (content != null && content.isNotEmpty) {
-          return _parseResult(content);
+          rawContent = content;
+          final result = _parseResult(content);
+          // 成功时也记录一条 debug 日志（方便查看返回内容）
+          if (debugEnabled) {
+            await addFailureLog(DebugLogEntry(
+              timestamp: DateTime.now(),
+              imagePath: imagePath,
+              modelName: cfg.modelName,
+              httpStatusCode: 200,
+              responseBody: _truncate(lastResponseBody, 500),
+              rawAIResponse: _truncate(rawContent!, 1000),
+              parsedTags: result['tags'],
+              errorMessage: '',
+            ));
+          }
+          return result;
         }
         throw Exception('API 返回了空内容，可能是模型不支持图片分析');
       } else if (response.statusCode == 401 || response.statusCode == 403) {
@@ -267,14 +358,29 @@ class CloudEnhanceService {
         throw Exception(
             '模型 ${cfg.modelName} 请求失败 (HTTP ${response.statusCode}): $body');
       }
-    } on Exception {
-      rethrow;
     } catch (e) {
-      throw Exception('网络请求异常: $e');
+      final msg = e is Exception ? e.toString() : '网络请求异常: $e';
+      if (debugEnabled) {
+        await addFailureLog(DebugLogEntry(
+          timestamp: DateTime.now(),
+          imagePath: imagePath,
+          modelName: cfg.modelName,
+          httpStatusCode: lastStatusCode,
+          responseBody: _truncate(lastResponseBody ?? '', 500),
+          rawAIResponse: _truncate(rawContent ?? '', 1000),
+          parsedTags: null,
+          errorMessage: msg,
+        ));
+      }
+      if (e is Exception) rethrow;
+      throw Exception(msg);
     } finally {
       client.close();
     }
   }
+
+  String _truncate(String s, int maxLen) =>
+      s.length <= maxLen ? s : '${s.substring(0, maxLen)}...';
 
   /// 批量分析图片（多模型并行）
   Future<Map<String, Map<String, String>>> batchAnalyze(
@@ -315,4 +421,52 @@ class CloudEnhanceService {
         .join(', ');
     return {'tags': tags};
   }
+}
+
+/// 云端解析调试日志条目
+class DebugLogEntry {
+  final DateTime timestamp;
+  final String imagePath;
+  final String modelName;
+  final int? httpStatusCode;
+  final String? responseBody;
+  final String? rawAIResponse;
+  final String? parsedTags;
+  final String errorMessage;
+
+  DebugLogEntry({
+    required this.timestamp,
+    required this.imagePath,
+    required this.modelName,
+    this.httpStatusCode,
+    this.responseBody,
+    this.rawAIResponse,
+    this.parsedTags,
+    required this.errorMessage,
+  });
+
+  bool get isSuccess => errorMessage.isEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'timestamp': timestamp.millisecondsSinceEpoch,
+        'imagePath': imagePath,
+        'modelName': modelName,
+        'httpStatusCode': httpStatusCode,
+        'responseBody': responseBody,
+        'rawAIResponse': rawAIResponse,
+        'parsedTags': parsedTags,
+        'errorMessage': errorMessage,
+      };
+
+  factory DebugLogEntry.fromJson(Map<String, dynamic> json) => DebugLogEntry(
+        timestamp:
+            DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int? ?? 0),
+        imagePath: json['imagePath'] as String? ?? '',
+        modelName: json['modelName'] as String? ?? '',
+        httpStatusCode: json['httpStatusCode'] as int?,
+        responseBody: json['responseBody'] as String?,
+        rawAIResponse: json['rawAIResponse'] as String?,
+        parsedTags: json['parsedTags'] as String?,
+        errorMessage: json['errorMessage'] as String? ?? '',
+      );
 }
