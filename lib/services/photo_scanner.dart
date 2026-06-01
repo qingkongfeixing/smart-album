@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -5,6 +6,7 @@ import '../models/photo.dart';
 import '../models/database_helper.dart';
 import 'cloud_enhance.dart';
 import 'notification_service.dart';
+import 'log_service.dart';
 
 enum ScanState { idle, scanning, completed, error }
 
@@ -38,7 +40,7 @@ class PhotoScanner {
     _cancelled = true;
     _cloudService.cancelHttpRequests();
     _stopForeground(); // fire-and-forget
-    debugPrint('[PhotoScanner] Cancel requested');
+    LogService.instance.info('PhotoScanner', 'Cancel requested');
   }
 
   /// 将 App 退到后台（扫描中按返回时使用）
@@ -46,7 +48,7 @@ class PhotoScanner {
     try {
       await _channel.invokeMethod('moveTaskToBack');
     } catch (e) {
-      debugPrint('[PhotoScanner] moveTaskToBack failed: $e');
+      LogService.instance.warning('PhotoScanner', 'moveTaskToBack failed: $e');
     }
   }
 
@@ -63,10 +65,15 @@ class PhotoScanner {
         'body': body,
         'progress': progress,
         'maxProgress': maxProgress,
-      });
+      }).timeout(const Duration(seconds: 5));
       return result ?? false;
+    } on TimeoutException {
+      LogService.instance.warning('PhotoScanner',
+          'startForegroundService timed out after 5s');
+      return false;
     } catch (e) {
-      debugPrint('[PhotoScanner] Failed to start foreground service: $e');
+      LogService.instance.warning('PhotoScanner',
+          'Failed to start foreground service: $e');
       return false;
     }
   }
@@ -84,18 +91,25 @@ class PhotoScanner {
         'body': body,
         'progress': progress,
         'maxProgress': maxProgress,
-      });
+      }).timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      // 静默跳过
     } catch (e) {
-      debugPrint('[PhotoScanner] Failed to update foreground progress: $e');
+      LogService.instance.warning('PhotoScanner',
+          'Failed to update foreground progress: $e');
     }
   }
 
   /// 停止前台 Service
   Future<void> _stopForeground() async {
     try {
-      await _channel.invokeMethod('stopForegroundService');
+      await _channel.invokeMethod('stopForegroundService')
+          .timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      // 静默跳过
     } catch (e) {
-      debugPrint('[PhotoScanner] Failed to stop foreground service: $e');
+      LogService.instance.warning('PhotoScanner',
+          'Failed to stop foreground service: $e');
     }
   }
 
@@ -125,6 +139,7 @@ class PhotoScanner {
     }
     _scanning = true;
     _cancelled = false;
+    _cloudService.resetForNewBatch();
     _lastScanTime = DateTime.now();
     _state.value = ScanState.scanning;
     _onProgress.value = const ScanProgress(0, 0, '');
@@ -145,7 +160,7 @@ class PhotoScanner {
       _scanning = false;
       return count;
     } catch (e) {
-      debugPrint('[PhotoScanner] Scan error: $e');
+      LogService.instance.error('PhotoScanner', 'Scan error: $e');
       _state.value = ScanState.error;
       _scanning = false;
       _stopForeground(); // fire-and-forget
@@ -160,6 +175,7 @@ class PhotoScanner {
     }
     _scanning = true;
     _cancelled = false;
+    _cloudService.resetForNewBatch();
     _lastScanTime = DateTime.now();
     _state.value = ScanState.scanning;
 
@@ -171,7 +187,7 @@ class PhotoScanner {
       _scanning = false;
       return count;
     } catch (e) {
-      debugPrint('[PhotoScanner] Scan folder error: $e');
+      LogService.instance.error('PhotoScanner', 'Scan folder error: $e');
       _state.value = ScanState.error;
       _scanning = false;
       _stopForeground(); // fire-and-forget
@@ -265,7 +281,8 @@ class PhotoScanner {
     }
 
     if (movedPaths.isNotEmpty) {
-      debugPrint('[PhotoScanner] Moved files matched: ${movedPaths.length}');
+      LogService.instance.info('PhotoScanner',
+          'Moved files matched: ${movedPaths.length}');
     }
 
     await _stopForeground();
@@ -297,7 +314,7 @@ class PhotoScanner {
 
       await _db.updatePhoto(photo.copyWith(tags: searchTags));
     } catch (e) {
-      debugPrint('[PhotoScanner] Cloud error for id=$photoId: $e');
+      LogService.instance.error('PhotoScanner', 'Cloud error for id=$photoId: $e');
     }
   }
 
@@ -318,6 +335,7 @@ class PhotoScanner {
 
     _scanning = true;
     _cancelled = false;
+    _cloudService.resetForNewBatch();
     _state.value = ScanState.scanning;
     final notify = NotificationService();
     final valid = photos.where((p) => p.id != null).toList();
@@ -336,12 +354,16 @@ class PhotoScanner {
 
     // 启动前台 Service + 初始通知
     final modelNames = models.map((m) => m.modelName).join(', ');
-    await _startForeground(
+    LogService.instance.info('PhotoScanner',
+        '云端解析启动: ${valid.length} 张图片, ${models.length} 个模型');
+    final fsResult = await _startForeground(
       title: title,
       body: '准备上传 ${valid.length} 张图片...',
       progress: 0,
       maxProgress: valid.length,
     );
+    LogService.instance.info('PhotoScanner',
+        'Foreground Service 启动${fsResult ? "成功" : "失败"}');
 
     // 轮询分配图片到各模型
     final modelQueues = List.generate(models.length, (_) => <Photo>[]);
@@ -440,7 +462,7 @@ class PhotoScanner {
       await _channel.invokeMethod('openFolder', {'path': folderPath});
       return true;
     } catch (e) {
-      debugPrint('[PhotoScanner] openFolder error: $e');
+      LogService.instance.error('PhotoScanner', 'openFolder error: $e');
       return false;
     }
   }
@@ -451,7 +473,7 @@ class PhotoScanner {
       final uri = await _channel.invokeMethod<String>('scanFile', {'path': filePath});
       return uri;
     } catch (e) {
-      debugPrint('[PhotoScanner] scanFile error: $e');
+      LogService.instance.error('PhotoScanner', 'scanFile error: $e');
       return null;
     }
   }
@@ -462,7 +484,7 @@ class PhotoScanner {
       final ok = await _channel.invokeMethod<bool>('deleteByUri', {'uri': uri});
       return ok ?? false;
     } catch (e) {
-      debugPrint('[PhotoScanner] deleteByUri error: $e');
+      LogService.instance.error('PhotoScanner', 'deleteByUri error: $e');
       return false;
     }
   }
@@ -472,7 +494,8 @@ class PhotoScanner {
     try {
       await _channel.invokeMethod('removeFromMediaStore', {'path': filePath});
     } catch (e) {
-      debugPrint('[PhotoScanner] removeFromMediaStore error: $e');
+      LogService.instance.warning('PhotoScanner',
+          'removeFromMediaStore error: $e');
     }
   }
 

@@ -150,7 +150,8 @@ lib/
 ├── services/
 │   ├── photo_scanner.dart        # 相册扫描 + 批量/单张云端解析编排 + 文件操作
 │   ├── cloud_enhance.dart        # 多模型云端 API（最多5个并行轮询）
-│   └── notification_service.dart # 扫描/解析进度通知
+│   ├── notification_service.dart # 扫描/解析进度通知
+│   └── log_service.dart           # 应用日志系统（文件持久化+轮转+UI查看）
 ├── screens/
 │   ├── gallery_screen.dart       # 主页（文件夹网格 → 照片网格 + 日期分组 + 多选/复制/粘贴）
 │   ├── search_screen.dart        # 关键词搜索 + 标签云浏览 + 临时分享
@@ -167,6 +168,16 @@ lib/
 - **Phase 1（当前）**：云端增强版 — 本地存储 + 可选第三方 API 标签
 - **Phase 2（计划中）**：端侧推理 — ONNX Runtime + MobileCLIP，离线语义搜索
 - **Phase 3**：OCR 深度融合 — FTS5 全文搜索 + 向量检索混合排序
+
+## 更新日志
+
+### 2026-06-01
+
+- 新增 **LogService** 全面日志系统：四级日志（DEBUG/INFO/WARNING/ERROR），按天分文件持久化，7天自动轮转，内存保留500条供UI查看，自动flush，全局错误捕获，debugPrint重定向
+- 修复 **MethodChannel 超时**导致"准备上传"卡死：_startForeground 加5秒超时，_updateForeground/_stopForeground 加3秒超时，超时静默跳过
+- 修复 **图片压缩 fallback 隐患**：压缩失败/超时不fallback原图直接跳过，加15秒超时，压缩前后记录大小日志
+- 所有 `debugPrint` 替换为 LogService 调用（共21处），云端API成功/失败同步记录
+- 设置页新增"启用应用日志"开关和"应用日志"查看页（等级筛选、关键词搜索、堆栈展开、导出分享、清空、统计）
 
 ## License
 

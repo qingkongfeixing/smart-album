@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'services/cloud_enhance.dart';
 import 'services/photo_scanner.dart';
 import 'services/notification_service.dart';
+import 'services/log_service.dart';
 import 'models/database_helper.dart';
 import 'screens/gallery_screen.dart';
 import 'utils/permissions.dart';
@@ -14,6 +15,7 @@ void main() async {
   final appDir = await getApplicationDocumentsDirectory();
   await DatabaseHelper.instance.init(appDir.path);
   await NotificationService().init();
+  await LogService.instance.init();
 
   // 启动时请求相册权限
   await PermissionHelper.requestStoragePermission();
@@ -27,6 +29,7 @@ void main() async {
       providers: [
         Provider<PhotoScanner>.value(value: scanner),
         Provider<CloudEnhanceService>.value(value: cloudService),
+        Provider<LogService>.value(value: LogService.instance),
       ],
       child: const SmartAlbumApp(),
     ),

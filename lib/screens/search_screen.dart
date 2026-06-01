@@ -8,6 +8,7 @@ import '../models/photo.dart';
 import '../models/database_helper.dart';
 import '../services/cloud_enhance.dart';
 import '../services/photo_scanner.dart';
+import '../services/log_service.dart';
 import '../widgets/photo_detail.dart';
 
 class SearchScreen extends StatefulWidget {
@@ -211,7 +212,8 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
         _tempShareCopied.add(_TempShareEntry(destPath, uri));
         copied++;
       } catch (e) {
-        debugPrint('[Search] TempShare error for ${photo.id}: $e');
+        LogService.instance.error('Search',
+            'TempShare error for ${photo.id}: $e');
       }
     }
 
@@ -250,7 +252,8 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
           }
         }
       } catch (e) {
-        debugPrint('[Search] Cleanup error for ${entry.path}: $e');
+        LogService.instance.error('Search',
+            'Cleanup error for ${entry.path}: $e');
       }
     }
   }

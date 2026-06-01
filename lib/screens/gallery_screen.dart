@@ -9,6 +9,7 @@ import '../models/photo.dart';
 import '../models/database_helper.dart';
 import '../services/photo_scanner.dart';
 import '../services/cloud_enhance.dart';
+import '../services/log_service.dart';
 import '../widgets/photo_detail.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
@@ -1319,7 +1320,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         }
         success++;
       } catch (e) {
-        debugPrint('[Gallery] Paste error: $e');
+        LogService.instance.error('Gallery', 'Paste error: $e');
       }
     }
     final total = photos.length;
@@ -1372,7 +1373,8 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         _tempShareCopied.add(_TempShareEntry(destPath, uri));
         copied++;
       } catch (e) {
-        debugPrint('[Gallery] TempShare error for ${photo.id}: $e');
+        LogService.instance.error('Gallery',
+            'TempShare error for ${photo.id}: $e');
       }
     }
 
@@ -1413,7 +1415,8 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
           }
         }
       } catch (e) {
-        debugPrint('[Gallery] Cleanup error for ${entry.path}: $e');
+        LogService.instance.error('Gallery',
+            'Cleanup error for ${entry.path}: $e');
       }
     }
   }
@@ -1467,7 +1470,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         await db.deletePhoto(id);
         deleted++;
       } catch (e) {
-        debugPrint('[Gallery] Delete error for $id: $e');
+        LogService.instance.error('Gallery', 'Delete error for $id: $e');
       }
     }
     _exitSelect();

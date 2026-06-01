@@ -7,6 +7,7 @@ import '../models/photo.dart';
 import '../models/database_helper.dart';
 import '../services/cloud_enhance.dart';
 import '../services/photo_scanner.dart';
+import '../services/log_service.dart';
 
 class PhotoDetailView extends StatefulWidget {
   final List<Photo> photos;
@@ -315,7 +316,7 @@ class _PhotoDetailViewState extends State<PhotoDetailView> with WidgetsBindingOb
       _tempShareStartedAt = DateTime.now();
       _tempShareTimer = Timer(Duration(seconds: durSec), _restoreTempShared);
     } catch (e) {
-      debugPrint('[PhotoDetail] TempShare error: $e');
+      LogService.instance.error('PhotoDetail', 'TempShare error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('临时分享失败'), duration: Duration(seconds: 2)),
@@ -342,7 +343,8 @@ class _PhotoDetailViewState extends State<PhotoDetailView> with WidgetsBindingOb
           }
         }
       } catch (e) {
-        debugPrint('[PhotoDetail] Cleanup error for ${entry.path}: $e');
+        LogService.instance.error('PhotoDetail',
+            'Cleanup error for ${entry.path}: $e');
       }
     }
   }

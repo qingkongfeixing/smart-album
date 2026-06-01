@@ -7,6 +7,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/cloud_enhance.dart';
 import '../services/photo_scanner.dart';
+import '../services/log_service.dart';
 import '../models/database_helper.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -326,6 +327,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  void _showAppLogsScreen(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const _AppLogsScreen()),
+    );
+  }
+
   @override
   void dispose() {
     super.dispose();
@@ -495,6 +503,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 cloudService.setDebugEnabled(v);
                 setState(() {});
               },
+            ),
+            Consumer<LogService>(
+              builder: (_, logService, __) => SwitchListTile(
+                secondary: const Icon(Icons.receipt_long),
+                title: const Text('启用应用日志'),
+                subtitle: const Text('记录应用运行日志到本地文件，包含所有模块'),
+                value: logService.enabled,
+                onChanged: (v) {
+                  logService.setEnabled(v);
+                  setState(() {});
+                },
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.receipt_long),
+              title: const Text('应用日志'),
+              subtitle: Consumer<LogService>(
+                builder: (_, logService, __) {
+                  final total = logService.entries.length;
+                  final errors = logService.entries
+                      .where((e) => e.level == LogLevel.error).length;
+                  return Text(total == 0
+                      ? '暂无日志'
+                      : '共 $total 条${errors > 0 ? '，错误 $errors 条' : ''}');
+                },
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _showAppLogsScreen(context),
             ),
             ListTile(
               leading: const Icon(Icons.text_fields),
@@ -916,6 +952,340 @@ class _DebugLogEntryCard extends StatelessWidget {
             child: SelectableText(value,
                 style: const TextStyle(fontSize: 13)),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 应用日志查看页面
+class _AppLogsScreen extends StatefulWidget {
+  const _AppLogsScreen();
+
+  @override
+  State<_AppLogsScreen> createState() => _AppLogsScreenState();
+}
+
+class _AppLogsScreenState extends State<_AppLogsScreen> {
+  LogLevel? _filterLevel; // null = 全部
+  String _keyword = '';
+  final _keywordCtrl = TextEditingController();
+  final Set<int> _expandedIndexes = {};
+
+  List<LogEntry> get _filtered {
+    final all = LogService.instance.entries;
+    return all.where((e) {
+      if (_filterLevel != null && e.level != _filterLevel) return false;
+      if (_keyword.isNotEmpty) {
+        final kw = _keyword.toLowerCase();
+        if (!e.message.toLowerCase().contains(kw) &&
+            !e.module.toLowerCase().contains(kw)) {
+          return false;
+        }
+      }
+      return true;
+    }).toList();
+  }
+
+  Color _levelColor(LogLevel level) {
+    switch (level) {
+      case LogLevel.debug:
+        return Colors.grey;
+      case LogLevel.info:
+        return Colors.blue;
+      case LogLevel.warning:
+        return Colors.orange;
+      case LogLevel.error:
+        return Colors.red;
+    }
+  }
+
+  String _timeStr(LogEntry e) {
+    final t = e.timestamp;
+    return '${t.hour.toString().padLeft(2, '0')}:'
+        '${t.minute.toString().padLeft(2, '0')}:'
+        '${t.second.toString().padLeft(2, '0')}';
+  }
+
+  void _shareLogs() async {
+    try {
+      await LogService.instance.shareLogs();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('分享失败: $e')),
+        );
+      }
+    }
+  }
+
+  void _clearLogs() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('清空日志'),
+        content: const Text('确认清空所有应用日志？此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await LogService.instance.clearAllLogs();
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _keywordCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _filtered;
+    final all = LogService.instance.entries;
+    final errors = all.where((e) => e.level == LogLevel.error).length;
+    final warnings = all.where((e) => e.level == LogLevel.warning).length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('应用日志'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share),
+            tooltip: '导出分享',
+            onPressed: all.isEmpty ? null : _shareLogs,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_sweep),
+            tooltip: '清空',
+            onPressed: all.isEmpty ? null : _clearLogs,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // 筛选栏
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  FilterChip(
+                    label: const Text('全部', style: TextStyle(fontSize: 12)),
+                    selected: _filterLevel == null,
+                    onSelected: (_) => setState(() => _filterLevel = null),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  const SizedBox(width: 4),
+                  for (final level in LogLevel.values)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 4),
+                      child: FilterChip(
+                        label: Text(level.label,
+                            style: TextStyle(
+                                fontSize: 12, color: _levelColor(level))),
+                        selected: _filterLevel == level,
+                        onSelected: (v) => setState(() =>
+                            _filterLevel = v ? level : null),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          // 关键词搜索
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: TextField(
+              controller: _keywordCtrl,
+              style: const TextStyle(fontSize: 13),
+              decoration: InputDecoration(
+                hintText: '搜索关键词...',
+                hintStyle: const TextStyle(fontSize: 13),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: _keyword.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear, size: 20),
+                        onPressed: () {
+                          _keywordCtrl.clear();
+                          setState(() => _keyword = '');
+                        },
+                      )
+                    : null,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8)),
+                filled: true,
+              ),
+              onChanged: (v) => setState(() => _keyword = v.trim()),
+            ),
+          ),
+          // 日志列表
+          Expanded(
+            child: filtered.isEmpty
+                ? const Center(
+                    child: Text('暂无日志',
+                        style: TextStyle(color: Colors.grey)),
+                  )
+                : ListView.builder(
+                    itemCount: filtered.length,
+                    itemBuilder: (context, index) {
+                      final entry = filtered[index];
+                      final isExpanded = _expandedIndexes.contains(index);
+                      return InkWell(
+                        onTap: entry.stackTrace != null
+                            ? () => setState(() {
+                                  if (isExpanded) {
+                                    _expandedIndexes.remove(index);
+                                  } else {
+                                    _expandedIndexes.add(index);
+                                  }
+                                })
+                            : null,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border(
+                              bottom:
+                                  BorderSide(color: Colors.grey.shade200),
+                            ),
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 5, vertical: 1),
+                                    decoration: BoxDecoration(
+                                      color: _levelColor(entry.level)
+                                          .withValues(alpha: 0.15),
+                                      borderRadius:
+                                          BorderRadius.circular(3),
+                                    ),
+                                    child: Text(
+                                      entry.level.label,
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                        color: _levelColor(entry.level),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    entry.module,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  Text(
+                                    _timeStr(entry),
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.grey.shade500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                entry.message,
+                                style: const TextStyle(fontSize: 12),
+                                maxLines: isExpanded ? null : 2,
+                                overflow: isExpanded
+                                    ? null
+                                    : TextOverflow.ellipsis,
+                              ),
+                              if (isExpanded && entry.stackTrace != null) ...[
+                                const SizedBox(height: 4),
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade100,
+                                    borderRadius:
+                                        BorderRadius.circular(4),
+                                  ),
+                                  child: SelectableText(
+                                    entry.stackTrace!,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.grey.shade700,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              if (entry.stackTrace != null && !isExpanded)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Icon(
+                                    Icons.expand_more,
+                                    size: 14,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          // 底栏统计
+          if (all.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                border: const Border(
+                    top: BorderSide(color: Colors.grey, width: 0.3)),
+              ),
+              child: SafeArea(
+                child: Row(
+                  children: [
+                    Text('共 ${all.length} 条',
+                        style: const TextStyle(fontSize: 12)),
+                    const SizedBox(width: 12),
+                    if (errors > 0)
+                      Text('错误 $errors',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.red)),
+                    const SizedBox(width: 8),
+                    if (warnings > 0)
+                      Text('警告 $warnings',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.orange)),
+                    const Spacer(),
+                    if (_filterLevel != null || _keyword.isNotEmpty)
+                      Text('显示 ${filtered.length}/${all.length}',
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.grey)),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );

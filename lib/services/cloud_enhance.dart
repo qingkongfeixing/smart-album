@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/constants.dart';
+import 'log_service.dart';
 
 /// 单个模型配置
 class ModelConfig {
@@ -99,6 +102,11 @@ class CloudEnhanceService {
     _httpCancelled = true;
     _activeClient?.close();
     _activeClient = null;
+  }
+
+  /// 开始新批次前重置取消标记
+  void resetForNewBatch() {
+    _httpCancelled = false;
   }
 
   bool get isEnabled => models.any((m) => m.isEnabled);
@@ -253,17 +261,40 @@ class CloudEnhanceService {
       final file = File(imagePath);
       if (!await file.exists()) return null;
 
-      final compressed = await FlutterImageCompress.compressWithFile(
-        imagePath,
-        minWidth: 1024,
-        minHeight: 1024,
-        quality: 70,
-        format: CompressFormat.jpeg,
-      );
-      final bytes = compressed ?? await file.readAsBytes();
-      final base64 = base64Encode(bytes);
+      final originalSize = await file.length();
+      Uint8List? compressed;
+      try {
+        compressed = await FlutterImageCompress.compressWithFile(
+          imagePath,
+          minWidth: 1024,
+          minHeight: 1024,
+          quality: 70,
+          format: CompressFormat.jpeg,
+        ).timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        LogService.instance.warning('CloudEnhance',
+            '图片压缩超时 (15s): $imagePath, 原始 ${(originalSize / 1024).toStringAsFixed(1)} KB');
+        return null;
+      } catch (e) {
+        LogService.instance.warning('CloudEnhance',
+            '图片压缩失败: $imagePath, 错误: $e');
+        return null;
+      }
+
+      if (compressed == null) {
+        LogService.instance.warning('CloudEnhance',
+            '图片压缩返回 null: $imagePath, 原始 ${(originalSize / 1024).toStringAsFixed(1)} KB');
+        return null;
+      }
+
+      LogService.instance.debug('CloudEnhance',
+          '图片压缩: ${(originalSize / 1024).toStringAsFixed(1)} KB -> ${(compressed.length / 1024).toStringAsFixed(1)} KB ($imagePath)');
+
+      final base64 = base64Encode(compressed);
       return 'data:image/jpeg;base64,$base64';
-    } catch (_) {
+    } catch (e) {
+      LogService.instance.warning('CloudEnhance',
+          '图片处理异常: $imagePath, 错误: $e');
       return null;
     }
   }
@@ -330,6 +361,8 @@ class CloudEnhanceService {
         if (content != null && content.isNotEmpty) {
           rawContent = content;
           final result = _parseResult(content);
+          LogService.instance.info('CloudEnhance',
+              'API 成功 [${cfg.modelName}]: ${imagePath.split('/').last}, 标签: ${result['tags']}');
           // 成功时也记录一条 debug 日志（方便查看返回内容）
           if (debugEnabled) {
             await addFailureLog(DebugLogEntry(
@@ -360,6 +393,8 @@ class CloudEnhanceService {
       }
     } catch (e) {
       final msg = e is Exception ? e.toString() : '网络请求异常: $e';
+      LogService.instance.error('CloudEnhance',
+          'API 失败 [${cfg.modelName}]: ${imagePath.split('/').last}, $msg');
       if (debugEnabled) {
         await addFailureLog(DebugLogEntry(
           timestamp: DateTime.now(),
