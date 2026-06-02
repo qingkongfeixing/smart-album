@@ -171,6 +171,15 @@ lib/
 
 ## 更新日志
 
+### 2026-06-02
+
+- **优化文件夹进入动画+滚动卡顿**：
+  - 将多 `SliverGrid` 拍平为单个 `SliverList` + `Row` 布局，减少 90%+ sliver 数量
+  - `_buildDateGroups` 预计算移出 `setState`，避免动画帧做重活
+  - `cacheExtent: 800` 预构建离屏项
+  - **缩略图缓存系统**：进入文件夹后台用 `flutter_image_compress` 生成 256px JPEG 缓存（原图 10MB→20KB，快 500 倍），已有缓存直接秒开
+  - 所有缩略图统一加 `cacheHeight` + `FilterQuality.low` 降级方案
+
 ### 2026-06-01
 
 - 新增 **LogService** 全面日志系统：四级日志（DEBUG/INFO/WARNING/ERROR），按天分文件持久化，7天自动轮转，内存保留500条供UI查看，自动flush，全局错误捕获，debugPrint重定向

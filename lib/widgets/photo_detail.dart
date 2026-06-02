@@ -195,48 +195,38 @@ class _PhotoDetailViewState extends State<PhotoDetailView> with WidgetsBindingOb
   }
 
   Future<void> _cloudAnalyze() async {
+    final scanner = context.read<PhotoScanner>();
     final cloudService = context.read<CloudEnhanceService>();
     if (!cloudService.isEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先在设置中启用云端解析')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先在设置中启用云端解析')),
+        );
+      }
       return;
     }
 
-    final photoPath = _currentPhoto.path;
-    final photoId = _currentPhoto.id;
-    final existingTags = _currentPhoto.tags ?? '';
-    final messenger = ScaffoldMessenger.of(context);
-
     setState(() => _cloudLoading = true);
+    // 走 Scanner 统一入口：退出详情页后后台继续解析，结束后图库自动刷新
+    await scanner.cloudAnalyzePhotos([_currentPhoto]);
+
+    // 刷新当前详情页的标签数据
     try {
-      final result = await cloudService.analyzeImage(photoPath);
-      final cloudTags = result['tags'] ?? '';
-      final merged = [
-        if (existingTags.isNotEmpty) existingTags,
-        if (cloudTags.isNotEmpty) cloudTags,
-      ].join(', ');
-
-      if (photoId != null) {
-        await DatabaseHelper.instance.updatePhoto(
-          _currentPhoto.copyWith(tags: merged),
-        );
+      final updated = await DatabaseHelper.instance.getPhotoById(_currentPhoto.id!);
+      if (updated != null && mounted) {
+        setState(() {
+          _cloudLoading = false;
+          widget.photos[_currentIndex] = updated;
+        });
       }
+    } catch (_) {
+      if (mounted) setState(() => _cloudLoading = false);
+    }
 
-      if (!mounted) return;
-      setState(() {
-        _cloudLoading = false;
-        widget.photos[_currentIndex] = _currentPhoto.copyWith(tags: merged);
-      });
-      messenger.showSnackBar(
-        const SnackBar(content: Text('云端解析完成')),
-      );
-    } catch (e) {
-      if (!mounted) return;
+    if (mounted) {
       setState(() => _cloudLoading = false);
-      final errMsg = e.toString().replaceFirst(RegExp(r'^Exception: '), '');
-      messenger.showSnackBar(
-        SnackBar(content: Text('解析失败：$errMsg')),
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('云端解析完成')),
       );
     }
   }

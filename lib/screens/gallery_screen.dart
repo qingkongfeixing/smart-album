@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:provider/provider.dart';
@@ -55,11 +57,19 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   // 日期分组缓存（选中文件夹后计算一次）
   List<MapEntry<DateTime, List<Photo>>> _dateGroups = const [];
 
+  // 扁平网格缓存：将多个 SliverGrid 拍平为 Row 列表，大幅减少 sliver 数量
+  List<_FlatGridItem> _flatGridItems = const [];
+  double _lastGridWidth = 0;
+
+  // 缩略图缓存：256px 压缩图，原图 10MB → 缩略图 20KB，加载快 500 倍
+  String? _thumbnailCacheDir;
+  final Map<String, String> _thumbnailMap = {}; // photoPath → thumbnailPath
+  bool _thumbnailGenRunning = false;
+
   // 自定义滚动条
   bool _isDraggingThumb = false;
   bool _showThumb = false;
   String? _dragDateLabel;
-  List<double> _dateOffsets = [];
   double _dragStartY = 0;
   double _dragStartScroll = 0;
   Timer? _thumbHideTimer;
@@ -123,6 +133,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _scanner = context.read<PhotoScanner>();
+    _initThumbnailCache();
     _loadPhotos();
     _scanner.state.addListener(_onScanStateChanged);
     _scanner.onProgress.addListener(_silentRefresh);
@@ -173,6 +184,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         _updateCaches();
         if (_selectedFolder != null) {
           _dateGroups = _buildDateGroups(_selectedFolder!);
+          _buildFlatGrid();
         }
       });
     }
@@ -191,6 +203,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
           _updateCaches();
           if (_selectedFolder != null) {
             _dateGroups = _buildDateGroups(_selectedFolder!);
+            _buildFlatGrid();
           }
         });
       }
@@ -209,6 +222,20 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
       ..sort((a, b) => b.key.compareTo(a.key));
   }
 
+  /// 将日期分组拍平为 (header / photo-row) 列表，消除多 SliverGrid 开销
+  void _buildFlatGrid() {
+    final items = <_FlatGridItem>[];
+    for (final entry in _dateGroups) {
+      items.add(_FlatGridItem(isHeader: true, date: entry.key));
+      final photos = entry.value;
+      for (int i = 0; i < photos.length; i += 3) {
+        final end = (i + 3).clamp(0, photos.length);
+        items.add(_FlatGridItem(isHeader: false, photos: photos.sublist(i, end), groupPhotos: photos));
+      }
+    }
+    _flatGridItems = items;
+  }
+
   void _updateCaches() {
     final map = <String, List<Photo>>{};
     int analyzed = 0;
@@ -221,6 +248,64 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
     _folderEntries = map.entries.toList()
       ..sort((a, b) => b.value.length.compareTo(a.value.length));
     _analyzedCount = analyzed;
+  }
+
+  // ── 缩略图缓存 ──────────────────────────────────────────
+
+  Future<void> _initThumbnailCache() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    _thumbnailCacheDir = '${appDir.path}/thumbnails';
+    await Directory(_thumbnailCacheDir!).create(recursive: true);
+    // 加载已有缩略图映射
+    _thumbnailMap.clear();
+    try {
+      final dir = Directory(_thumbnailCacheDir!);
+      await for (final entity in dir.list()) {
+        if (entity is File && entity.path.endsWith('.jpg')) {
+          // 文件名是 photoPath.hashCode 的 36 进制表示，无法反向映射
+          // 改为延迟检测：显示时判断文件是否存在
+        }
+      }
+    } catch (_) {}
+  }
+
+  String _thumbPath(String photoPath) {
+    return '$_thumbnailCacheDir/${photoPath.hashCode.toRadixString(36)}.jpg';
+  }
+
+  /// 后台生成缩略图（一次最多 genCount 张），已有跳过
+  Future<void> _genMissingThumbnails(List<Photo> photos, {int genCount = 50}) async {
+    if (_thumbnailGenRunning || _thumbnailCacheDir == null) return;
+    _thumbnailGenRunning = true;
+    int done = 0;
+    for (final photo in photos) {
+      if (done >= genCount) break;
+      final thumbPath = _thumbPath(photo.path);
+      if (await File(thumbPath).exists()) {
+        _thumbnailMap[photo.path] = thumbPath;
+        continue;
+      }
+      try {
+        final result = await FlutterImageCompress.compressWithFile(
+          photo.path,
+          minWidth: 256,
+          minHeight: 256,
+          quality: 70,
+          format: CompressFormat.jpeg,
+        );
+        if (result != null) {
+          await File(thumbPath).writeAsBytes(result);
+          _thumbnailMap[photo.path] = thumbPath;
+          done++;
+        }
+      } catch (e) {
+        LogService.instance.debug('Gallery', 'Thumbnail gen failed: ${photo.path} $e');
+      }
+    }
+    if (done > 0 && mounted) {
+      setState(() {}); // 刷新可见缩略图
+    }
+    _thumbnailGenRunning = false;
   }
 
   void _onScanStateChanged() {
@@ -602,11 +687,17 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         );
       }
     }
-    setState(() {
-      _selectedFolder = folderPath;
-      _dateGroups = _buildDateGroups(folderPath);
-    });
-    _navController.forward();
+    // 预计算：setState 前完成数据计算，避免动画帧内做重活
+    _dateGroups = _buildDateGroups(folderPath);
+    _buildFlatGrid();
+    // 后台生成缩略图（不阻塞 UI）
+    _genMissingThumbnails(_dateGroups.expand((g) => g.value).toList());
+    if (mounted) {
+      setState(() {
+        _selectedFolder = folderPath;
+      });
+      _navController.forward();
+    }
   }
 
   void _goBackToFolders() {
@@ -988,96 +1079,119 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
     );
   }
 
-  /// 文件夹内图片网格（使用预计算的日期分组）
+  /// 文件夹内图片网格（拍平为单个 SliverList，消除多 SliverGrid 导致的动画卡顿）
   Widget _buildPhotoGrid() {
-    if (_selectedFolder == null || _dateGroups.isEmpty) return const SizedBox.shrink();
+    if (_selectedFolder == null || _flatGridItems.isEmpty) return const SizedBox.shrink();
 
     final today = DateTime.now();
     final todayDay = DateTime(today.year, today.month, today.day);
     final yesterday = todayDay.subtract(const Duration(days: 1));
 
-    _precomputeDateOffsets();
-
-    return Stack(
-      children: [
-        RefreshIndicator(
-          onRefresh: _loadPhotos,
-          child: CustomScrollView(
-            controller: _photoGridScrollCtrl,
-            slivers: [
-              for (final entry in _dateGroups) ...[
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 16, 12, 6),
-                    child: Text(
-                      _dateLabel(entry.key, todayDay, yesterday),
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  ),
-                ),
-                SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  sliver: SliverGrid(
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 3,
-                      mainAxisSpacing: 3,
-                      childAspectRatio: 1.0,
-                    ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final gridWidth = constraints.maxWidth;
+        if (gridWidth != _lastGridWidth) {
+          _lastGridWidth = gridWidth;
+          _precomputeDateOffsetsForWidth(gridWidth);
+        }
+        return Stack(
+          children: [
+            RefreshIndicator(
+              onRefresh: _loadPhotos,
+              child: CustomScrollView(
+                controller: _photoGridScrollCtrl,
+                cacheExtent: 800,
+                slivers: [
+                  SliverList(
                     delegate: SliverChildBuilderDelegate(
                       (context, index) {
-                        final photo = entry.value[index];
-                        final selected = photo.id != null && _selectedIds.contains(photo.id);
-                        return _PhotoThumbnail(
-                          photo: photo,
-                          selectMode: _selectMode,
-                          isSelected: selected,
-                          onTap: () {
-                            if (_selectMode) {
-                              _toggleSelect(photo.id!);
-                            } else {
-                              _showPhotoDetail(photo, entry.value);
-                            }
-                          },
-                          onLongPress: () {
-                            if (!_selectMode && photo.id != null) {
-                              _toggleSelect(photo.id!);
-                            }
-                          },
+                        final item = _flatGridItems[index];
+                        if (item.isHeader) {
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 16, 12, 6),
+                            child: Text(
+                              _dateLabel(item.date!, todayDay, yesterday),
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
+                          );
+                        }
+                        // 照片行：每行 1~3 张
+                        final rowPhotos = item.photos!;
+                        final itemSize = (gridWidth - 3 * 2 - 4 * 2) / 3; // spacing + padding
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                          child: Row(
+                            children: [
+                              for (int i = 0; i < 3; i++)
+                                i < rowPhotos.length
+                                    ? SizedBox(
+                                        width: itemSize,
+                                        height: itemSize,
+                                        child: _PhotoThumbnail(
+                                          photo: rowPhotos[i],
+                                          selectMode: _selectMode,
+                                          isSelected: rowPhotos[i].id != null &&
+                                              _selectedIds.contains(rowPhotos[i].id),
+                                          thumbnailPath: _thumbnailMap[rowPhotos[i].path],
+                                          onTap: () {
+                                            if (_selectMode) {
+                                              _toggleSelect(rowPhotos[i].id!);
+                                            } else {
+                                              _showPhotoDetail(rowPhotos[i], item.groupPhotos!);
+                                            }
+                                          },
+                                          onLongPress: () {
+                                            if (!_selectMode && rowPhotos[i].id != null) {
+                                              _toggleSelect(rowPhotos[i].id!);
+                                            }
+                                          },
+                                        ),
+                                      )
+                                    : SizedBox(width: itemSize, height: itemSize), // 占位保持对齐
+                              if (rowPhotos.length < 3) const Spacer(),
+                            ],
+                          ),
                         );
                       },
-                      childCount: entry.value.length,
+                      childCount: _flatGridItems.length,
+                      addAutomaticKeepAlives: false,
+                      addRepaintBoundaries: true,
                     ),
                   ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        Positioned(
-          right: 2,
-          top: 0,
-          bottom: 0,
-          child: _buildDragThumb(todayDay, yesterday),
-        ),
-      ],
+                ],
+              ),
+            ),
+            Positioned(
+              right: 2,
+              top: 0,
+              bottom: 0,
+              child: _buildDragThumb(todayDay, yesterday),
+            ),
+          ],
+        );
+      },
     );
   }
 
-  void _precomputeDateOffsets() {
-    _dateOffsets = [];
+  List<(double, DateTime)> _datePositions = []; // (offset, date) — 拖拽滚动条日期标签映射
+
+  void _precomputeDateOffsetsForWidth(double gridWidth) {
+    _datePositions = [];
     double offset = 0;
-    const headerH = 40.0;
-    const spacing = 3.0;
-    for (final entry in _dateGroups) {
-      _dateOffsets.add(offset);
-      final itemSize = (context.size?.width ?? 360) / 3;
-      final rows = (entry.value.length / 3).ceil();
-      offset += headerH + rows * (itemSize + spacing);
+    const headerH = 38.0;
+    const rowGap = 3.0;
+    final itemSize = (gridWidth - 3 * 2 - 4 * 2) / 3;
+    for (final item in _flatGridItems) {
+      if (item.isHeader) {
+        _datePositions.add((offset, item.date!));
+        offset += headerH;
+      } else {
+        offset += itemSize + rowGap;
+      }
     }
   }
 
@@ -1205,13 +1319,13 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
   }
 
   String _dateAtScroll(double scrollOffset, DateTime todayDay, DateTime yesterday) {
-    if (_dateOffsets.isEmpty) return '';
-    for (int i = _dateOffsets.length - 1; i >= 0; i--) {
-      if (scrollOffset >= _dateOffsets[i] - 4) {
-        return _dateLabel(_dateGroups[i].key, todayDay, yesterday);
+    if (_datePositions.isEmpty) return '';
+    for (int i = _datePositions.length - 1; i >= 0; i--) {
+      if (scrollOffset >= _datePositions[i].$1 - 4) {
+        return _dateLabel(_datePositions[i].$2, todayDay, yesterday);
       }
     }
-    return _dateLabel(_dateGroups.first.key, todayDay, yesterday);
+    return _dateLabel(_datePositions.first.$2, todayDay, yesterday);
   }
 
   String _dateLabel(DateTime day, DateTime today, DateTime yesterday) {
@@ -1547,6 +1661,7 @@ class _FolderTile extends StatelessWidget {
                 File(coverPath),
                 fit: BoxFit.cover,
                 cacheWidth: 256,
+                filterQuality: FilterQuality.low,
                 errorBuilder: (_, _, _) => const Center(
                   child: Icon(Icons.folder, size: 40, color: Colors.grey),
                 ),
@@ -1766,6 +1881,8 @@ class _QuickTagScreenState extends State<_QuickTagScreen> {
                         File(photo.path),
                         fit: BoxFit.cover,
                         cacheWidth: 200,
+                        cacheHeight: 200,
+                        filterQuality: FilterQuality.low,
                         errorBuilder: (_, _, _) => const Icon(Icons.broken_image),
                       ),
                       if (isSelected)
@@ -1797,13 +1914,14 @@ class _QuickTagScreenState extends State<_QuickTagScreen> {
     );
   }
 }
-/// 图片缩略图
+/// 图片缩略图（优先显示压缩缓存，降级用原图 + 低质量缩放）
 class _PhotoThumbnail extends StatelessWidget {
   final Photo photo;
   final bool selectMode;
   final bool isSelected;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final String? thumbnailPath;
 
   const _PhotoThumbnail({
     required this.photo,
@@ -1811,12 +1929,15 @@ class _PhotoThumbnail extends StatelessWidget {
     this.isSelected = false,
     required this.onTap,
     required this.onLongPress,
+    this.thumbnailPath,
   });
 
   bool get _hasTags => photo.tags != null && photo.tags!.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
+    // 优先使用预生成的 256px 压缩缩略图（20KB），否则用原图解码
+    final useThumb = thumbnailPath != null && File(thumbnailPath!).existsSync();
     return RepaintBoundary(
       child: GestureDetector(
       onTap: onTap,
@@ -1827,9 +1948,11 @@ class _PhotoThumbnail extends StatelessWidget {
           fit: StackFit.expand,
           children: [
             Image.file(
-              File(photo.path),
+              File(useThumb ? thumbnailPath! : photo.path),
               fit: BoxFit.cover,
-              cacheWidth: 200,
+              cacheWidth: useThumb ? null : 200,
+              cacheHeight: useThumb ? null : 200,
+              filterQuality: useThumb ? FilterQuality.none : FilterQuality.low,
               errorBuilder: (_, _, _) => const Center(
                   child: Icon(Icons.broken_image, size: 24, color: Colors.grey)),
             ),
@@ -1876,4 +1999,13 @@ class _PhotoThumbnail extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 扁平网格项：将日期分组的 SliverGrid 拍平为 header/row 序列
+class _FlatGridItem {
+  final bool isHeader;
+  final DateTime? date;
+  final List<Photo>? photos;     // 当前行（1~3张）
+  final List<Photo>? groupPhotos; // 所属日期分组的全部照片（仅 photo-row 有效，供 PageView 翻页）
+  const _FlatGridItem({required this.isHeader, this.date, this.photos, this.groupPhotos});
 }

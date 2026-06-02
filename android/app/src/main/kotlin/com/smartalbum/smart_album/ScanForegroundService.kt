@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class ScanForegroundService : Service() {
@@ -42,9 +43,21 @@ class ScanForegroundService : Service() {
         }
     }
 
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // 持有 PARTIAL_WAKE_LOCK，防止 CPU 在后台休眠导致网络请求超时
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "SmartAlbum:ScanCloud"
+        ).apply {
+            setReferenceCounted(false)
+            acquire(30 * 60 * 1000L) // 30分钟超时兜底，防止异常情况永不休眠
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -131,6 +144,8 @@ class ScanForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         instance = null
         super.onDestroy()
     }
