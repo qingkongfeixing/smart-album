@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/photo.dart';
 import '../utils/constants.dart';
 import 'log_service.dart';
 
@@ -120,6 +121,12 @@ class CloudEnhanceService {
       models.where((m) => m.isEnabled).toList();
 
   bool isFolderExcluded(String folderPath) => excludedFolders.contains(folderPath);
+
+  /// 判断某张图片的**文件路径**是否位于被排除的文件夹中。
+  /// [excludedFolders] 存的是文件夹绝对路径，而 MediaStore 返回的 folder
+  /// 字段只是 BUCKET_DISPLAY_NAME（文件夹名），所以必须从文件路径截父目录来比。
+  bool isPhotoExcluded(String photoPath) =>
+      isPathInFolders(photoPath, excludedFolders);
 
   Future<void> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
@@ -307,11 +314,18 @@ class CloudEnhanceService {
         (models.isNotEmpty
             ? models.first
             : ModelConfig());
-    if (cfg.apiKey.isEmpty) throw Exception('API Key 未配置，请在设置中填写');
-    if (cfg.apiBaseUrl.isEmpty) throw Exception('API Base URL 未配置，请在设置中填写');
+    if (cfg.apiKey.isEmpty) {
+      throw const CloudAnalyzeException('API Key 未配置，请在设置中填写');
+    }
+    if (cfg.apiBaseUrl.isEmpty) {
+      throw const CloudAnalyzeException('API Base URL 未配置，请在设置中填写');
+    }
 
     final imageUrl = await _imageToBase64Url(imagePath);
-    if (imageUrl == null) throw Exception('图片压缩或编码失败');
+    if (imageUrl == null) {
+      // 压缩失败多为瞬时 IO/超时，可重试
+      throw const CloudAnalyzeException('图片压缩或编码失败', retryable: true);
+    }
 
     // 每个请求使用独立的 http.Client，避免并发请求互相取消
     final client = http.Client();
@@ -321,7 +335,7 @@ class CloudEnhanceService {
     String? rawContent;
 
     try {
-      if (_httpCancelled) throw Exception('已取消');
+      if (_httpCancelled) throw const CloudAnalyzeException('已取消');
       final response = await client.post(
         Uri.parse(cfg.apiBaseUrl),
         headers: {
@@ -378,21 +392,39 @@ class CloudEnhanceService {
           }
           return result;
         }
-        throw Exception('API 返回了空内容，可能是模型不支持图片分析');
+        // 空内容通常是模型能力问题，重试无意义
+        throw const CloudAnalyzeException('API 返回了空内容，可能是模型不支持图片分析');
       } else if (response.statusCode == 401 || response.statusCode == 403) {
-        throw Exception(
-            '模型 ${cfg.modelName} API Key 无效或无权访问 (HTTP ${response.statusCode})');
+        throw CloudAnalyzeException(
+            '模型 ${cfg.modelName} API Key 无效或无权访问 (HTTP ${response.statusCode})',
+            statusCode: response.statusCode);
       } else if (response.statusCode == 404) {
-        throw Exception('模型 ${cfg.modelName} API 地址无效 (HTTP 404)，请检查 Base URL');
+        throw const CloudAnalyzeException(
+            'API 地址无效 (HTTP 404)，请检查 Base URL',
+            statusCode: 404);
       } else {
         final body = response.body.length > 200
             ? '${response.body.substring(0, 200)}...'
             : response.body;
-        throw Exception(
-            '模型 ${cfg.modelName} 请求失败 (HTTP ${response.statusCode}): $body');
+        // 429 限流与 5xx 服务端错误值得重试
+        final code = response.statusCode;
+        final retryable = code == 429 || code >= 500;
+        throw CloudAnalyzeException(
+            '模型 ${cfg.modelName} 请求失败 (HTTP $code): $body',
+            retryable: retryable,
+            statusCode: code);
       }
     } catch (e) {
-      final msg = e is Exception ? e.toString() : '网络请求异常: $e';
+      final CloudAnalyzeException err;
+      if (e is CloudAnalyzeException) {
+        err = e;
+      } else if (e is TimeoutException) {
+        err = const CloudAnalyzeException('请求超时 (30s)', retryable: true);
+      } else {
+        // SocketException / HandshakeException / ClientException 等网络层故障
+        err = CloudAnalyzeException('网络请求异常: $e', retryable: true);
+      }
+      final msg = err.message;
       LogService.instance.error('CloudEnhance',
           'API 失败 [${cfg.modelName}]: ${imagePath.split('/').last}, $msg');
       if (debugEnabled) {
@@ -407,41 +439,78 @@ class CloudEnhanceService {
           errorMessage: msg,
         ));
       }
-      if (e is Exception) rethrow;
-      throw Exception(msg);
+      throw err;
     } finally {
       client.close();
     }
   }
 
-  String _truncate(String s, int maxLen) =>
-      s.length <= maxLen ? s : '${s.substring(0, maxLen)}...';
+  /// 重试退避间隔：第 1 次失败等 1s，第 2 次等 3s
+  static const List<Duration> _retryBackoff = [
+    Duration(seconds: 1),
+    Duration(seconds: 3),
+  ];
 
-  /// 批量分析图片（多模型并行）
-  Future<Map<String, Map<String, String>>> batchAnalyze(
-      List<String> imagePaths) async {
-    final enabled = enabledModels;
-    if (enabled.isEmpty) throw Exception('至少需要配置一个模型');
+  /// 带重试与模型回退的单张解析。
+  ///
+  /// 策略：先用 [model] 重试至多 2 次（1s / 3s 退避），仍失败则依次换其他
+  /// 已启用模型各试一次。仅 [CloudAnalyzeException.retryable] 为真的错误
+  /// 才重试；401/403/404 等配置错误直接失败，但仍会换模型（另一个模型的
+  /// Key 可能是好的）。
+  Future<Map<String, String>> analyzeImageWithRetry(String imagePath,
+      {ModelConfig? model}) async {
+    final primary = model ??
+        (enabledModels.isNotEmpty ? enabledModels.first : ModelConfig());
 
-    final results = <String, Map<String, String>>{};
-    final modelCount = enabled.length;
+    // 候选模型：主模型优先，其余已启用模型作为回退
+    final candidates = <ModelConfig>[
+      primary,
+      ...enabledModels.where((m) => !identical(m, primary)),
+    ];
 
-    // 轮询分配图片到各模型
-    final queues = List.generate(modelCount, (_) => <String>[]);
-    for (int i = 0; i < imagePaths.length; i++) {
-      queues[i % modelCount].add(imagePaths[i]);
+    final fileName = imagePath.split('/').last;
+    CloudAnalyzeException? lastError;
+
+    for (int mi = 0; mi < candidates.length; mi++) {
+      final cfg = candidates[mi];
+      // 主模型重试 2 次，回退模型各只试 1 次
+      final maxAttempts = mi == 0 ? _retryBackoff.length + 1 : 1;
+
+      for (int attempt = 0; attempt < maxAttempts; attempt++) {
+        if (_httpCancelled) {
+          throw const CloudAnalyzeException('已取消');
+        }
+        try {
+          return await analyzeImage(imagePath, model: cfg);
+        } on CloudAnalyzeException catch (e) {
+          lastError = e;
+          if (e.message == '已取消') rethrow;
+
+          final hasNextAttempt = e.retryable && attempt + 1 < maxAttempts;
+          if (hasNextAttempt) {
+            final wait = _retryBackoff[attempt];
+            LogService.instance.warning(
+                'CloudEnhance',
+                '重试 ${attempt + 1}/${maxAttempts - 1} [${cfg.modelName}] '
+                '$fileName，${wait.inSeconds}s 后: ${e.message}');
+            await Future.delayed(wait);
+            continue;
+          }
+          break; // 不可重试或已用尽本模型的机会 → 换下一个模型
+        }
+      }
+
+      if (mi + 1 < candidates.length) {
+        LogService.instance.warning('CloudEnhance',
+            '模型回退 [${cfg.modelName}] → [${candidates[mi + 1].modelName}]: $fileName');
+      }
     }
 
-    await Future.wait(enabled.asMap().entries.map((entry) async {
-      final idx = entry.key;
-      final model = entry.value;
-      for (final path in queues[idx]!) {
-        results[path] = await analyzeImage(path, model: model);
-      }
-    }));
-
-    return results;
+    throw lastError ?? const CloudAnalyzeException('解析失败');
   }
+
+  String _truncate(String s, int maxLen) =>
+      s.length <= maxLen ? s : '${s.substring(0, maxLen)}...';
 
   /// 解析模型回复，提取标签
   Map<String, String> _parseResult(String raw) {
@@ -460,6 +529,21 @@ class CloudEnhanceService {
         .join(', ');
     return {'tags': tags};
   }
+}
+
+/// 云端解析异常。[retryable] 标记该错误是否值得重试：
+/// 网络超时、5xx、429 等瞬时故障可重试；
+/// 401/403/404 属配置错误，重试只会浪费时间和额度。
+class CloudAnalyzeException implements Exception {
+  final String message;
+  final bool retryable;
+  final int? statusCode;
+
+  const CloudAnalyzeException(this.message,
+      {this.retryable = false, this.statusCode});
+
+  @override
+  String toString() => message;
 }
 
 /// 云端解析调试日志条目

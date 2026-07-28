@@ -9,7 +9,7 @@ class AppConstants {
 
   // ── 数据库配置 ──────────────────────────────────────────
   static const String dbName = 'smart_album.db';
-  static const int dbVersion = 1;
+  static const int dbVersion = 4;
 
   // ── 搜索配置 ────────────────────────────────────────────
   static const int defaultTopK = 100;

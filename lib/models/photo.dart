@@ -1,3 +1,16 @@
+/// 判断 [photoPath] 的**直接父目录**是否在 [folders] 中。
+///
+/// 子目录不算命中：`/a/b/c.jpg` 的父目录是 `/a/b`，若 [folders] 只含 `/a`
+/// 则返回 false。这与 GalleryScreen 按直接父目录聚合文件夹的口径一致。
+///
+/// 放在 model 层是为了让 DatabaseHelper 和 CloudEnhanceService 共用同一实现。
+bool isPathInFolders(String photoPath, Set<String> folders) {
+  if (folders.isEmpty) return false;
+  final i = photoPath.lastIndexOf('/');
+  if (i <= 0) return false;
+  return folders.contains(photoPath.substring(0, i));
+}
+
 /// 图片实体类
 class Photo {
   final int? id;
@@ -5,7 +18,13 @@ class Photo {
   final int timestamp;
   final int width;
   final int height;
-  final String hash;
+
+  /// 文件字节大小（字符串形式）。与文件名组合成指纹
+  /// `文件名_大小`，用于在扫描时识别「被移动到别处的同一文件」，
+  /// 从而保留其已有标签而不重新解析。
+  /// 注意：不是内容哈希，历史上曾用 `hash` 列名存放该值。
+  final String fileSize;
+
   final String? ocrText;
   final String? tags;
   final String? cloudData;
@@ -16,7 +35,7 @@ class Photo {
     required this.timestamp,
     required this.width,
     required this.height,
-    required this.hash,
+    required this.fileSize,
     this.ocrText,
     this.tags,
     this.cloudData,
@@ -28,7 +47,7 @@ class Photo {
     int? timestamp,
     int? width,
     int? height,
-    String? hash,
+    String? fileSize,
     String? ocrText,
     String? tags,
     String? cloudData,
@@ -39,7 +58,7 @@ class Photo {
       timestamp: timestamp ?? this.timestamp,
       width: width ?? this.width,
       height: height ?? this.height,
-      hash: hash ?? this.hash,
+      fileSize: fileSize ?? this.fileSize,
       ocrText: ocrText ?? this.ocrText,
       tags: tags ?? this.tags,
       cloudData: cloudData ?? this.cloudData,
@@ -53,7 +72,7 @@ class Photo {
       'timestamp': timestamp,
       'width': width,
       'height': height,
-      'hash': hash,
+      'file_size': fileSize,
       'ocr_text': ocrText,
       'tags': tags,
       'cloud_data': cloudData,
@@ -67,7 +86,8 @@ class Photo {
       timestamp: map['timestamp'] as int,
       width: map['width'] as int,
       height: map['height'] as int,
-      hash: map['hash'] as String,
+      // v4 起使用 file_size；兼容仍可能读到旧 hash 列的场景
+      fileSize: (map['file_size'] ?? map['hash'] ?? '') as String,
       ocrText: map['ocr_text'] as String?,
       tags: map['tags'] as String?,
       cloudData: map['cloud_data'] as String?,

@@ -364,6 +364,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Text(
+              '仅建立本地索引，不会上传图片。生成标签请在相册页选择文件夹后手动解析。',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ),
           const _SectionHeader('数据统计'),
           ListTile(
             leading: const Icon(Icons.photo_library),
@@ -592,7 +599,6 @@ class _ModelConfigCardState extends State<_ModelConfigCard> {
   late TextEditingController _modelNameCtrl;
   late TextEditingController _baseUrlCtrl;
   late TextEditingController _apiKeyCtrl;
-  bool _showKey = false;
 
   @override
   void initState() {
@@ -727,19 +733,11 @@ class _ModelConfigCardState extends State<_ModelConfigCard> {
             const SizedBox(height: 8),
             TextField(
               controller: _apiKeyCtrl,
-              obscureText: !_showKey,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 labelText: 'API Key',
                 hintText: 'sk-or-v1-...',
-                prefixIcon: const Icon(Icons.key, size: 20),
+                prefixIcon: Icon(Icons.key, size: 20),
                 isDense: true,
-                suffixIcon: IconButton(
-                  icon: Icon(
-                    _showKey ? Icons.visibility_off : Icons.visibility,
-                    size: 20,
-                  ),
-                  onPressed: () => setState(() => _showKey = !_showKey),
-                ),
               ),
               onChanged: (_) => _save(cloud),
             ),

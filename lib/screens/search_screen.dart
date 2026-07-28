@@ -35,7 +35,8 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
 
   // 标签浏览
   Map<String, int> _allTags = {};
-  bool _loadingTags = false;
+  // 初值 true：_loadTags 延后到首帧后执行，避免首帧闪出「无标签」
+  bool _loadingTags = true;
   final _tagFilterCtrl = TextEditingController();
   static const int _tagPageSize = 100;
 
@@ -65,13 +66,17 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _loadTags();
+    // 延后到首帧之后，_loadTags 需要通过 context 读取排除文件夹配置
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _loadTags();
+    });
   }
 
   Future<void> _loadTags() async {
     setState(() => _loadingTags = true);
     try {
-      final tags = await _db.getAllTags();
+      final excluded = context.read<CloudEnhanceService>().excludedFolders;
+      final tags = await _db.getAllTags(excludedFolders: excluded);
       if (mounted) setState(() { _allTags = tags; _loadingTags = false; });
     } catch (e) {
       if (mounted) setState(() => _loadingTags = false);
@@ -181,7 +186,8 @@ class _SearchScreenState extends State<SearchScreen> with WidgetsBindingObserver
     });
 
     try {
-      final ids = await _db.searchByKeyword(query);
+      final excluded = context.read<CloudEnhanceService>().excludedFolders;
+      final ids = await _db.searchByKeyword(query, excludedFolders: excluded);
       final photos = await _db.getPhotosByIds(ids);
 
       // 计算关联标签建议

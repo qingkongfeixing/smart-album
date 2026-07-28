@@ -20,7 +20,7 @@ class DatabaseHelper {
   Future<void> init(String dbPath) async {
     _db = await openDatabase(
       p.join(dbPath, AppConstants.dbName),
-      version: 3,
+      version: AppConstants.dbVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -34,7 +34,7 @@ class DatabaseHelper {
         timestamp INTEGER NOT NULL,
         width INTEGER NOT NULL,
         height INTEGER NOT NULL,
-        hash TEXT NOT NULL,
+        file_size TEXT NOT NULL DEFAULT '',
         ocr_text TEXT,
         tags TEXT,
         cloud_data TEXT
@@ -57,6 +57,52 @@ class DatabaseHelper {
       try {
         await db.execute('ALTER TABLE photos ADD COLUMN cloud_data TEXT');
       } catch (_) {}
+    }
+    if (oldVersion < 4) {
+      await _migrateHashToFileSize(db);
+    }
+  }
+
+  /// v4：`hash` 列名不副实（存的是文件字节大小）→ 重建表改名为 `file_size`。
+  /// 旧表的 `hash` 是 NOT NULL 且无默认值，若只做 ADD COLUMN 会导致新插入
+  /// 缺少 hash 值而失败，所以必须整表重建。
+  Future<void> _migrateHashToFileSize(Database db) async {
+    try {
+      final cols = await db.rawQuery('PRAGMA table_info(photos)');
+      final names = cols.map((c) => c['name'] as String).toSet();
+      if (names.contains('file_size')) return; // 已迁移
+
+      await db.transaction((txn) async {
+        await txn.execute('''
+          CREATE TABLE photos_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT UNIQUE NOT NULL,
+            timestamp INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            file_size TEXT NOT NULL DEFAULT '',
+            ocr_text TEXT,
+            tags TEXT,
+            cloud_data TEXT
+          )
+        ''');
+        final src = names.contains('hash') ? 'hash' : "''";
+        await txn.execute('''
+          INSERT INTO photos_new
+            (id, path, timestamp, width, height, file_size, ocr_text, tags, cloud_data)
+          SELECT id, path, timestamp, width, height, $src, ocr_text, tags, cloud_data
+          FROM photos
+        ''');
+        await txn.execute('DROP TABLE photos');
+        await txn.execute('ALTER TABLE photos_new RENAME TO photos');
+        await txn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_photos_tags ON photos(tags)');
+      });
+      LogService.instance.info('DatabaseHelper', 'v4 迁移完成: hash → file_size');
+    } catch (e) {
+      LogService.instance
+          .error('DatabaseHelper', 'v4 迁移失败 (hash → file_size): $e');
+      rethrow;
     }
   }
 
@@ -127,13 +173,19 @@ class DatabaseHelper {
 
   // ── 标签聚合 ──────────────────────────────────────────
 
-  /// 返回所有不重复标签及其出现次数，按次数降序
-  Future<Map<String, int>> getAllTags() async {
+  /// 返回所有不重复标签及其出现次数，按次数降序。
+  /// [excludedFolders] 中的图片其标签不计入统计。
+  Future<Map<String, int>> getAllTags(
+      {Set<String> excludedFolders = const {}}) async {
     final rows = await _db.rawQuery(
-      'SELECT tags FROM photos WHERE tags IS NOT NULL AND tags != \'\'',
+      "SELECT tags, path FROM photos WHERE tags IS NOT NULL AND tags != ''",
     );
     final counts = <String, int>{};
     for (final row in rows) {
+      if (excludedFolders.isNotEmpty &&
+          isPathInFolders(row['path'] as String, excludedFolders)) {
+        continue;
+      }
       final tagsStr = row['tags'] as String?;
       if (tagsStr == null || tagsStr.isEmpty) continue;
       for (final raw in tagsStr.split(',')) {
@@ -160,7 +212,12 @@ class DatabaseHelper {
   // LIKE '%中文%' 在多字节 UTF-8 字符上可能不可靠。
   // INSTR 是纯字节级子串查找，对中文 100% 可靠。
 
-  Future<List<int>> searchByKeyword(String query) async {
+  /// [excludedFolders] 为被排除的文件夹绝对路径集合，其中的图片不出现在结果里。
+  /// 排除在 Dart 侧按「直接父目录」判断，与
+  /// CloudEnhanceService.isPhotoExcluded 口径一致（子目录算独立文件夹）；
+  /// SQLite 无 dirname，用 SQL 表达该语义既啰嗦又依赖隐式类型转换。
+  Future<List<int>> searchByKeyword(String query,
+      {Set<String> excludedFolders = const {}}) async {
     // 先按 。 拆分组（组间 OR），同时支持 \n 作为组分隔
     final groups = query
         .split(RegExp(r'[。\n]'))
@@ -199,26 +256,48 @@ class DatabaseHelper {
 
     final where = groupConditions.join(' OR ');
 
-    final allArgs = [...args, AppConstants.defaultTopK];
+    // 有排除项时放宽 LIMIT，因为过滤发生在取回之后，
+    // 否则被排除的图会占掉 top-K 名额导致结果变少。
+    final limit = excludedFolders.isEmpty
+        ? AppConstants.defaultTopK
+        : AppConstants.defaultTopK * 4;
+    final allArgs = [...args, limit];
     LogService.instance.debug('Search', 'SQL WHERE: $where, args: $allArgs');
 
     // 同时打印原始 SQL 方便直接在 DB 工具中测试
-    var sqlForDebug = 'SELECT id FROM photos WHERE $where ORDER BY timestamp DESC LIMIT ${AppConstants.defaultTopK}';
+    var sqlForDebug =
+        'SELECT id, path FROM photos WHERE $where ORDER BY timestamp DESC LIMIT $limit';
     for (int i = 0; i < args.length; i++) {
       sqlForDebug = sqlForDebug.replaceFirst('?', "'${args[i]}'");
     }
     LogService.instance.debug('Search', '可执行SQL: $sqlForDebug');
 
     final rows = await _db.rawQuery('''
-      SELECT id FROM photos
+      SELECT id, path FROM photos
       WHERE $where
       ORDER BY timestamp DESC
       LIMIT ?
     ''', allArgs);
 
-    LogService.instance.debug('Search', '结果数: ${rows.length}');
+    var ids = rows.map<int>((r) => r['id'] as int).toList();
 
-    return rows.map<int>((r) => r['id'] as int).toList();
+    if (excludedFolders.isNotEmpty) {
+      final before = ids.length;
+      ids = [
+        for (final r in rows)
+          if (!isPathInFolders(r['path'] as String, excludedFolders))
+            r['id'] as int,
+      ];
+      if (ids.length > AppConstants.defaultTopK) {
+        ids = ids.sublist(0, AppConstants.defaultTopK);
+      }
+      LogService.instance.debug(
+          'Search', '排除过滤: $before → ${ids.length}（${excludedFolders.length} 个文件夹）');
+    }
+
+    LogService.instance.debug('Search', '结果数: ${ids.length}');
+
+    return ids;
   }
 
   // ── 清理 ─────────────────────────────────────────────

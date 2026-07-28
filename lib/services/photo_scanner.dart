@@ -205,13 +205,12 @@ class PhotoScanner {
     final byFingerprint = <String, Photo>{};
     for (final p in existingPhotos) {
       final name = p.path.split('/').last;
-      byFingerprint['${name}_${p.hash}'] = p;
+      byFingerprint['${name}_${p.fileSize}'] = p;
     }
 
     final movedPaths = <String>{};
     final notify = NotificationService();
     int lastNotifyAt = 0;
-    final pendingCloud = <Map<String, dynamic>>[];
 
     _onProgress.value = ScanProgress(0, total, '扫描中...');
     await _startForeground(
@@ -258,27 +257,21 @@ class PhotoScanner {
         timestamp: img['timestamp'] as int? ?? 0,
         width: img['width'] as int? ?? 0,
         height: img['height'] as int? ?? 0,
-        hash: size,
+        fileSize: size,
       );
 
       final photoId = await _db.insertPhoto(photo);
       if (photoId > 0) {
-        final folderName = img['folder'] as String? ?? '其他';
-        await _db.updatePhoto(photo.copyWith(tags: folderName));
-        pendingCloud.add({'id': photoId, 'path': path});
+        // 不写任何占位标签：tags 非空是「已解析」的唯一判据
+        // （见 gallery_screen 的 _isParsed / _analyzedCount），
+        // 写入占位会让新图被误判为已解析而跳过云端解析。
         processedCount++;
       }
     }
 
-    // 并发云端解析
-    if (_cloudService.isEnabled && pendingCloud.isNotEmpty) {
-      const concurrency = 3;
-      for (int i = 0; i < pendingCloud.length && !_cancelled; i += concurrency) {
-        final batch = pendingCloud.skip(i).take(concurrency).toList();
-        await Future.wait(batch.map((p) =>
-            _processCloud((p['id'] as int), (p['path'] as String))));
-      }
-    }
+    // 扫描只做本地索引，不自动调用云端 API。
+    // 解析必须由用户显式触发（相册页的「云端解析此文件夹」/ 多选解析），
+    // 那些入口都有确认框会告知张数，避免扫描一次就静默产生大量费用。
 
     if (movedPaths.isNotEmpty) {
       LogService.instance.info('PhotoScanner',
@@ -294,22 +287,6 @@ class PhotoScanner {
     );
 
     return (count: processedCount, movedPaths: movedPaths);
-  }
-
-  /// 仅云端标签+文字识别
-  Future<void> _processCloud(int photoId, String filePath) async {
-    if (!_cloudService.isEnabled) return;
-    final photo = await _db.getPhotoById(photoId);
-    if (photo == null) return;
-
-    try {
-      final cloudResult = await _cloudService.analyzeImage(filePath);
-      final cloudTags = cloudResult['tags'] ?? '';
-      // 直接用云端标签替换（初始扫描时的 folderName 占位标签不再需要）
-      await _db.updatePhoto(photo.copyWith(tags: cloudTags));
-    } catch (e) {
-      LogService.instance.error('PhotoScanner', 'Cloud error for id=$photoId: $e');
-    }
   }
 
   Future<String> cloudAnalyzeAll() async {
@@ -332,7 +309,15 @@ class PhotoScanner {
     _cloudService.resetForNewBatch();
     _state.value = ScanState.scanning;
     final notify = NotificationService();
-    final valid = photos.where((p) => p.id != null).toList();
+    // 过滤掉被排除文件夹中的图片，避免为它们花钱调 API
+    final valid = photos
+        .where((p) => p.id != null && !_cloudService.isPhotoExcluded(p.path))
+        .toList();
+    if (valid.isEmpty) {
+      _state.value = ScanState.completed;
+      _scanning = false;
+      return '没有需要解析的图片（可能都在已排除的文件夹中）';
+    }
     _onProgress.value = ScanProgress(0, valid.length, '准备上传...');
     int success = 0;
     int failed = 0;
@@ -394,8 +379,8 @@ class PhotoScanner {
           final batch = queue.skip(i).take(concurrency).toList();
           final results = await Future.wait(batch.map((p) async {
             try {
-              final result =
-                  await _cloudService.analyzeImage(p.path, model: model);
+              final result = await _cloudService
+                  .analyzeImageWithRetry(p.path, model: model);
               return (p, result, null);
             } catch (e) {
               return (p, null, e.toString());
@@ -405,7 +390,7 @@ class PhotoScanner {
           for (final (photo, result, error) in results) {
             if (error != null) {
               failed++;
-              lastError = error.replaceFirst(RegExp(r'^Exception: '), '');
+              lastError = error;
               continue;
             }
             if (result == null) continue;

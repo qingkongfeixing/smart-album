@@ -168,10 +168,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
 
   List<Photo> _filterExcluded(List<Photo> photos) {
     final cloud = context.read<CloudEnhanceService>();
-    return photos.where((p) {
-      final dir = p.path.substring(0, p.path.lastIndexOf('/'));
-      return !cloud.isFolderExcluded(dir);
-    }).toList();
+    return photos.where((p) => !cloud.isPhotoExcluded(p.path)).toList();
   }
 
   Future<void> _loadPhotos() async {
@@ -415,7 +412,9 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
                 return ListTile(
                   leading: Icon(excluded ? Icons.visibility : Icons.visibility_off),
                   title: Text(excluded ? '显示此文件夹' : '隐藏此文件夹'),
-                  subtitle: Text(excluded ? '重新在主页面显示' : '不在主页显示，也不参与云端解析'),
+                  subtitle: Text(excluded
+                      ? '重新在主页面显示'
+                      : '不在主页显示，不参与云端解析，也不出现在搜索结果'),
                   onTap: () async {
                     Navigator.pop(context);
                     if (excluded) {
@@ -499,7 +498,7 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
         title: Text(allExcluded ? '显示文件夹' : '隐藏文件夹'),
         content: Text(allExcluded
             ? '将显示所选 $count 个文件夹'
-            : '所选 $count 个文件夹将不在主页显示，也不上传解析'),
+            : '所选 $count 个文件夹将不在主页显示，不上传解析，也不出现在搜索结果中'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('确认')),
@@ -1425,7 +1424,9 @@ class _GalleryScreenState extends State<GalleryScreen> with SingleTickerProvider
             timestamp: stat.modified.millisecondsSinceEpoch,
             width: photo.width,
             height: photo.height,
-            hash: '${stat.size}_${stat.modified.millisecondsSinceEpoch}',
+            // 与 PhotoScanner 的指纹格式保持一致（纯字节大小），
+            // 否则后续扫描无法把它识别为同一文件
+            fileSize: '${stat.size}',
             tags: photo.tags,
             ocrText: photo.ocrText,
             cloudData: photo.cloudData,
